@@ -1,0 +1,10 @@
+services:
+  web:
+    build: .
+    ports:
+      - "8000:8000"
+    volumes:
+      - wagonhub_data:/data
+    restart: unless-stopped
+volumes:
+  wagonhub_data:

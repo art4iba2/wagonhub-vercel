@@ -1,0 +1,21 @@
+<component name="InspectionProjectProfileManager">
+  <profile version="1.0">
+    <option name="myName" value="Project Default" />
+    <inspection_tool class="Eslint" enabled="true" level="WARNING" enabled_by_default="true" />
+    <inspection_tool class="PyPackageRequirementsInspection" enabled="true" level="WARNING" enabled_by_default="true">
+      <option name="ignoredPackages">
+        <list>
+          <option value="fastapi" />
+          <option value="uvicorn" />
+          <option value="SQLAlchemy" />
+          <option value="pydantic" />
+          <option value="pydantic-settings" />
+          <option value="python-dotenv" />
+          <option value="psycopg" />
+          <option value="python-multipart" />
+          <option value="email-validator" />
+        </list>
+      </option>
+    </inspection_tool>
+  </profile>
+</component>

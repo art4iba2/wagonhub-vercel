@@ -1,0 +1,9 @@
+.venv/
+.pytest_cache/
+.coverage
+__pycache__/
+tests/
+upload/
+*.db
+*.db-*
+*.zip

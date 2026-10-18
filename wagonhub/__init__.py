@@ -1,0 +1,1 @@
+"""WagonHub application."""

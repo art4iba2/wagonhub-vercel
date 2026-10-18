@@ -1,0 +1,26 @@
+[project]
+name = "wagonhub"
+version = "0.1.0"
+description = "Площадка аренды вагоно-мест"
+requires-python = ">=3.14"
+dependencies = ["fastapi>=0.115,<1", "uvicorn>=0.34,<1", "pydantic[email]>=2.10,<3", "psycopg[binary]>=3.2,<4"]
+
+[build-system]
+requires = ["setuptools>=75"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["wagonhub"]
+
+[tool.setuptools.package-data]
+wagonhub = ["static/*"]
+
+[tool.vercel]
+entrypoint = "wagonhub.app:app"
+
+[project.optional-dependencies]
+test = ["pytest>=8,<10", "pytest-cov>=6,<8", "httpx>=0.28,<1"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "--cov=wagonhub --cov-report=term-missing --cov-fail-under=90"
