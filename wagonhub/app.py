@@ -8,12 +8,14 @@ from contextlib import asynccontextmanager, closing
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from fastapi import Body, Depends, FastAPI, HTTPException, Query, Request, Response
-from fastapi.responses import HTMLResponse
+from fastapi import BackgroundTasks, Body, Depends, FastAPI, HTTPException, Query, Request, Response
+from fastapi.exception_handlers import request_validation_exception_handler
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-from . import db, invites, security
-from .schemas import AdminInviteIn, CompanyIn, DealIn, Decision, ListingIn, Login, NotificationReceipt, Register
+from . import db, invites, password_reset, security
+from .schemas import AdminInviteIn, CompanyIn, DealIn, Decision, ListingIn, Login, NotificationReceipt, Register, ResetComplete, ResetRequest, ResetVerify
 
 STATIC = Path(__file__).parent / 'static'
 LOGGER = logging.getLogger(__name__)
@@ -32,6 +34,21 @@ app = FastAPI(title='ВагонМесто API', version='0.1.0', lifespan=lifesp
               redoc_url=None if security.production() else '/redoc',
               openapi_url=None if security.production() else '/openapi.json')
 app.mount('/static', StaticFiles(directory=STATIC), name='static')
+
+
+@app.exception_handler(RequestValidationError)
+async def validation_error(request: Request, exc: RequestValidationError):
+    if request.url.path.startswith('/api/password-reset/'):
+        messages = {
+            'email': 'Проверьте адрес электронной почты',
+            'code': 'Введите 8 цифр из письма',
+            'token': 'Начните восстановление заново',
+            'password': 'Пароль должен содержать от 8 до 128 символов',
+        }
+        errors = [{'msg': messages.get(error['loc'][-1], 'Проверьте данные формы')}
+                  for error in exc.errors()]
+        return JSONResponse({'detail': errors}, status_code=422, headers={'Cache-Control': 'no-store'})
+    return await request_validation_exception_handler(request, exc)
 
 
 def fail(code, message):
@@ -115,7 +132,8 @@ def page(*, private_page=False):
     html = (STATIC / 'index.html').read_text(encoding='utf-8')
     html = html.replace('__YANDEX_METRIKA_ID__', counter_id).replace(
         '__PILOT_INVITE_REQUIRED__', str(security.production()).lower()).replace(
-        '__PILOT_ADMIN_ENABLED__', str(bool(security.admin_email())).lower())
+        '__PILOT_ADMIN_ENABLED__', str(bool(security.admin_emails())).lower())
+    html = html.replace('__PASSWORD_RESET_ENABLED__', str(password_reset.settings() is not None).lower())
     headers = {'Cache-Control': 'no-store', 'Referrer-Policy': 'no-referrer'} if private_page else None
     return HTMLResponse(html, headers=headers)
 
@@ -136,13 +154,18 @@ def admin_page():
     return page(private_page=True)
 
 
+@app.get('/reset-password', include_in_schema=False)
+def reset_page():
+    return page(private_page=True)
+
+
 @app.post('/api/register', status_code=201)
 def register(payload: Register, request: Request, response: Response):
     require_browser_header(request)
     email = str(payload.email).lower()
     security.throttle('register', request, email)
-    master_signup = bool(security.admin_email() and email == security.admin_email())
-    if (master_signup or (security.production() and payload.invite_token is None)) and not (
+    admin_signup = email in security.admin_emails()
+    if (admin_signup or (security.production() and payload.invite_token is None)) and not (
             security.allowed_signup(email, payload.role, payload.invite_code)):
         fail(403, 'Проверьте email, роль и код приглашения')
     salt = secrets.token_hex(16)
@@ -177,9 +200,69 @@ def login(payload: Login, request: Request, response: Response):
     if not row or not hmac.compare_digest(row['password_hash'], digest) or not member:
         fail(401, 'Неверный email или пароль')
     with db.transaction() as con:
-        token = issue_token(con, row['id'])
+        # Serialize session issuance with password replacement on the same account.
+        fresh = reset_user(con, email, lock=True)
+        if not fresh or fresh['password_hash'] != row['password_hash'] or fresh['salt'] != row['salt']:
+            fail(401, 'Неверный email или пароль')
+        token = issue_token(con, fresh['id'])
     set_session(response, token)
     return {'user': public_user(row)}
+
+
+def reset_user(con, email, *, lock=False):
+    query = 'SELECT id,email,role,password_hash,salt FROM users WHERE email=?'
+    if lock and db.DATABASE_URL:
+        query += ' FOR UPDATE'
+    return con.execute(query, (email,)).fetchone()
+
+
+def reset_context(action, request, response, address, *, email_limit):
+    require_browser_header(request)
+    config = password_reset.settings()
+    if not config:
+        fail(503, 'Восстановление пароля пока недоступно')
+    email = str(address).lower()
+    security.throttle(action, request, email, email_limit=email_limit)
+    response.headers['Cache-Control'] = 'no-store'
+    return email, config
+
+
+@app.post('/api/password-reset/request', status_code=202)
+def request_reset(payload: ResetRequest, request: Request, response: Response, tasks: BackgroundTasks):
+    email, (key, sender, secret) = reset_context('reset-send', request, response, payload.email, email_limit=3)
+    with db.transaction() as con:
+        row = reset_user(con, email, lock=True)
+        issued = password_reset.issue(con, row['id'], secret) if row and pilot_member(con, row) else None
+    if issued:
+        challenge, code = issued
+        tasks.add_task(password_reset.deliver, key, sender, row['id'], email, challenge, code)
+    return {'message': 'Если аккаунт доступен, мы отправим код на указанный email.'}
+
+
+@app.post('/api/password-reset/verify')
+def verify_reset(payload: ResetVerify, request: Request, response: Response):
+    email, (_, _, secret) = reset_context('reset-verify', request, response, payload.email, email_limit=10)
+    with db.transaction() as con:
+        row = reset_user(con, email, lock=True)
+        token = password_reset.verify(con, row['id'], secret, payload.code) if row and pilot_member(con, row) else None
+    if not token:
+        fail(400, 'Код неверен или истёк. При необходимости запросите новый.')
+    return {'token': token}
+
+
+@app.post('/api/password-reset/complete', status_code=204)
+def complete_reset(payload: ResetComplete, request: Request, response: Response):
+    email, (_, _, secret) = reset_context('reset-complete', request, response, payload.email, email_limit=5)
+    salt = secrets.token_hex(16)
+    digest = password_hash(payload.password, salt)
+    with db.transaction() as con:
+        row = reset_user(con, email, lock=True)
+        if not row or not pilot_member(con, row) or not password_reset.consume(con, row['id'], secret, payload.token):
+            fail(400, 'Подтверждение недействительно или истекло. Начните восстановление заново.')
+        con.execute('UPDATE users SET salt=?,password_hash=? WHERE id=?', (salt, digest, row['id']))
+        con.execute('DELETE FROM sessions WHERE user_id=?', (row['id'],))
+    # Clear any existing site session in this browser; require a regular login.
+    response.delete_cookie(security.COOKIE, secure=security.production(), httponly=True, samesite='lax')
 
 
 @app.post('/api/logout', status_code=204)
@@ -439,7 +522,7 @@ def admin_invites(response: Response, user=Depends(require_admin)):
 @app.post('/api/admin/invites', status_code=201)
 def admin_create_invite(payload: AdminInviteIn, response: Response, user=Depends(require_admin)):
     email = str(payload.email).lower()
-    if email == security.admin_email() or email in security.invitations():
+    if email in security.admin_emails() or email in security.invitations():
         fail(409, 'Этот адрес уже настроен в списке приглашённых')
     with db.transaction() as con:
         invite = invites.issue(con, user['id'], email, payload.role, payload.inn)

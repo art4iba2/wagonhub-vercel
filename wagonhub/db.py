@@ -141,6 +141,12 @@ CREATE TABLE IF NOT EXISTS auth_limits (
  PRIMARY KEY(key,bucket)
 );
 CREATE INDEX IF NOT EXISTS idx_auth_limits_bucket ON auth_limits(bucket);
+CREATE TABLE IF NOT EXISTS password_resets (
+ user_id BIGINT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+ challenge TEXT NOT NULL, code_hash TEXT, expires_at BIGINT NOT NULL,
+ sent_at BIGINT NOT NULL, attempts INTEGER NOT NULL DEFAULT 0,
+ grant_hash TEXT, grant_expires_at BIGINT
+);
 CREATE TABLE IF NOT EXISTS pilot_invites (
  id TEXT PRIMARY KEY, email TEXT NOT NULL,
  role TEXT NOT NULL CHECK(role IN ('track','wagon')), inn TEXT,

@@ -7,6 +7,7 @@ if (location.pathname === '/invite') {
 }
 
 const app = document.querySelector('#app');
+let recovery = {step:'email', email:'', token:null};
 localStorage.removeItem('wagonhub_token');
 const state = { user: null, filters: {}, before: null, next: null, cursors: [], alerts: [], newInvite: null };
 const escapeHtml = value => String(value ?? '').replace(/[&<>"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));
@@ -34,7 +35,7 @@ const send = (path, body) => api(path,{method:'POST',body:JSON.stringify(body)})
 const values = form => Object.fromEntries(new FormData(form).entries());
 function pageHeading(title, description) { return `<div class="page-heading"><h1>${title}</h1><p>${description}</p></div>`; }
 function empty(title, description, action='') { return `<div class="empty"><div class="symbol">◇</div><h3>${title}</h3><p>${description}</p>${action}</div>`; }
-function currentPage() { return location.hash.slice(1).split('?')[0] || (location.pathname==='/admin'?'admin':'home'); }
+function currentPage() { return location.hash.slice(1).split('?')[0] || (location.pathname==='/admin'?'admin':location.pathname==='/reset-password'?'reset-password':'home'); }
 function refreshNav() {
   const page=currentPage();
   document.querySelector('#admin-link').hidden=!state.user?.is_admin;
@@ -48,6 +49,7 @@ async function render() {
   try {
     if (page==='home') return renderHome();
     if (page==='listings') return await renderListings();
+    if (page==='reset-password') return renderRecovery();
     if (page==='login'||page==='register') return renderAuth(page);
     if (!state.user) { location.hash='login'; return; }
     if (page==='admin') {
@@ -89,7 +91,7 @@ function renderAuth(page) {
   const signup=page==='register';
   const params=new URLSearchParams(location.hash.split('?')[1]||'');
   const trackSignup=(linkInvite?.role||params.get('role'))==='track';
-  app.innerHTML=`<div class="auth-wrap"><div class="form-card"><div class="eyebrow">ВагонМесто</div><h1>${signup?'Создать аккаунт':'С возвращением'}</h1><p>${signup?'Выберите роль. Для участия в пилоте используйте данные из приглашения.':'Войдите, чтобы работать с объявлениями и заявками.'}</p>${signup&&linkInvite?'<p class="hint">Ссылка прикреплена. Используйте email, на который вас пригласили.</p>':''}${signup&&params.has('invalid_invite')?'<p class="hint">Ссылка неполная. Попросите администратора прислать её ещё раз.</p>':''}<form id="auth-form">${signup?`<div class="field"><label>Ваше имя</label><input name="name" required minlength="2" maxlength="100" autocomplete="name"></div>`:''}<div class="field"><label>Email</label><input name="email" type="email" required autocomplete="email"></div><div class="field"><label>Пароль</label><input name="password" type="password" required minlength="${signup?8:1}" autocomplete="${signup?'new-password':'current-password'}"></div>${signup?`<div class="field"><label>Тип аккаунта</label><select name="role"${linkInvite?' disabled':''}><option value="wagon" ${trackSignup?'':'selected'}>Владелец вагонов</option><option value="track" ${trackSignup?'selected':''}>Владелец путей</option></select></div>${(window.WAGONHUB_INVITE_REQUIRED||window.WAGONHUB_ADMIN_ENABLED)&&!linkInvite?`<div class="field"><label>Код приглашения</label><input name="invite_code" ${window.WAGONHUB_INVITE_REQUIRED?'required':''} maxlength="128" autocomplete="off"></div>`:''}`:''}<button class="btn" type="submit">${signup?'Зарегистрироваться':'Войти'}</button></form><div class="auth-switch">${signup?'Уже есть аккаунт? <a href="#login">Войти</a>':'Нет аккаунта? <a href="#register">Зарегистрироваться</a>'}</div></div></div>`;
+  app.innerHTML=`<div class="auth-wrap"><div class="form-card"><div class="eyebrow">ВагонМесто</div><h1>${signup?'Создать аккаунт':'С возвращением'}</h1><p>${signup?'Выберите роль. Для участия в пилоте используйте данные из приглашения.':'Войдите, чтобы работать с объявлениями и заявками.'}</p>${signup&&linkInvite?'<p class="hint">Ссылка прикреплена. Используйте email, на который вас пригласили.</p>':''}${signup&&params.has('invalid_invite')?'<p class="hint">Ссылка неполная. Попросите администратора прислать её ещё раз.</p>':''}<form id="auth-form">${signup?`<div class="field"><label>Ваше имя</label><input name="name" required minlength="2" maxlength="100" autocomplete="name"></div>`:''}<div class="field"><label>Email</label><input name="email" type="email" required autocomplete="email"></div><div class="field"><label>Пароль</label><input name="password" type="password" required minlength="${signup?8:1}" autocomplete="${signup?'new-password':'current-password'}"></div>${signup?`<div class="field"><label>Тип аккаунта</label><select name="role"${linkInvite?' disabled':''}><option value="wagon" ${trackSignup?'':'selected'}>Владелец вагонов</option><option value="track" ${trackSignup?'selected':''}>Владелец путей</option></select></div>${(window.WAGONHUB_INVITE_REQUIRED||window.WAGONHUB_ADMIN_ENABLED)&&!linkInvite?`<div class="field"><label>Код приглашения</label><input name="invite_code" ${window.WAGONHUB_INVITE_REQUIRED?'required':''} maxlength="128" autocomplete="off"></div>`:''}`:''}<button class="btn" type="submit">${signup?'Зарегистрироваться':'Войти'}</button></form>${!signup&&window.WAGONHUB_PASSWORD_RESET_ENABLED?'<div class="auth-switch"><a href="/reset-password">Забыли пароль?</a></div>':''}<div class="auth-switch">${signup?'Уже есть аккаунт? <a href="#login">Войти</a>':'Нет аккаунта? <a href="#register">Зарегистрироваться</a>'}</div></div></div>`;
 }
 async function renderAccount() {
   const user=state.user;
@@ -148,10 +150,53 @@ async function renderAdmin() {
   });
 }
 
+function renderRecovery() {
+  if (!window.WAGONHUB_PASSWORD_RESET_ENABLED) {
+    app.innerHTML=empty('Восстановление недоступно', 'Отправка писем пока не настроена.', '<a class="btn" href="/#login">Ко входу</a>');
+    return;
+  }
+  const step=recovery.step;
+  const form=step==='email'
+    ? `<div class="field"><label for="reset-email">Email аккаунта</label><input id="reset-email" name="email" type="email" required autocomplete="email" value="${escapeHtml(recovery.email)}"></div><button class="btn" type="submit">Получить код</button>`
+    : step==='code'
+      ? '<div class="field"><label for="reset-code">Код из письма</label><input id="reset-code" name="code" required inputmode="numeric" pattern="[0-9]{8}" maxlength="8" autocomplete="one-time-code"></div><button class="btn" type="submit">Подтвердить код</button><button class="btn ghost" type="button" id="reset-resend">Запросить новый код</button>'
+      : '<div class="field"><label for="reset-new">Новый пароль</label><input id="reset-new" name="password" type="password" minlength="8" maxlength="128" required autocomplete="new-password"></div><div class="field"><label for="reset-confirm">Повторите новый пароль</label><input id="reset-confirm" name="confirm" type="password" minlength="8" maxlength="128" required autocomplete="new-password"></div><button class="btn" type="submit">Сохранить пароль</button>';
+  const description=step==='email'?'Введите email, который использовали при регистрации.'
+    :step==='code'?`Если аккаунт доступен, код отправлен на ${escapeHtml(recovery.email)}. Проверьте папку «Спам». Между отправками должна пройти минута.`
+      :'Код подтверждён. Придумайте новый пароль.';
+  app.innerHTML=`<div class="auth-wrap"><div class="form-card"><h1>Восстановление пароля</h1><p>${description}</p>
+    <form id="reset-form">${form}<p id="reset-error" class="hint" role="alert"></p></form>
+    <div class="auth-switch"><a href="/#login">Вернуться ко входу</a>${step!=='email'?' · <button class="btn ghost small" type="button" id="reset-start">Начать заново</button>':''}</div></div></div>`;
+}
+
+async function submitRecovery(form) {
+  const fields=values(form);
+  if (recovery.step==='email') {
+    const email=fields.email.trim();
+    await send('/password-reset/request',{email});
+    recovery={step:'code',email,token:null};
+  } else if (recovery.step==='code') {
+    const result=await send('/password-reset/verify',{email:recovery.email,code:fields.code});
+    recovery={...recovery,step:'password',token:result.token};
+  } else {
+    if (fields.password!==fields.confirm) throw new Error('Пароли не совпадают');
+    await send('/password-reset/complete',{email:recovery.email,token:recovery.token,password:fields.password});
+    recovery={step:'email',email:'',token:null};
+    state.user=null;
+    state.newInvite=null;
+    history.replaceState(null,'','/#login');
+    await render();
+    toast('Пароль изменён. Войдите с новым паролем.');
+    return;
+  }
+  renderRecovery();
+}
+
 async function handleSubmit(e) {
-  const form=e.target; if (!['auth-form','filters','listing-form','company-form','invite-form'].includes(form.id)) return;
+  const form=e.target; if (!['auth-form','filters','listing-form','company-form','invite-form','reset-form'].includes(form.id)) return;
   e.preventDefault(); const v=values(form); const button=form.querySelector('[type=submit]'); button.disabled=true;
   try {
+    if (form.id==='reset-form') { await submitRecovery(form); return; }
     if (form.id==='filters') { state.before=null; state.cursors=[]; state.filters=Object.fromEntries(Object.entries(v).filter(([,value])=>value)); window.wagonhubAnalytics?.goal('filters_submit'); await render(); }
     if (form.id==='auth-form') { const signup=location.hash.startsWith('#register'); if (signup && linkInvite) { v.invite_token=linkInvite.token; v.role=linkInvite.role; } const result=await send(signup?'/register':'/login',v); linkInvite=null; state.user=result.user; window.wagonhubAnalytics?.goal(signup?'registration_success':'login_success'); if (location.pathname==='/admin'&&state.user.is_admin) { history.replaceState(null,'','/admin'); await render(); } else { location.hash='account'; } toast('Вы вошли в аккаунт'); }
     if (form.id==='listing-form') {
@@ -171,12 +216,28 @@ async function handleSubmit(e) {
       toast('Приглашение создано');
     }
     if (form.id==='company-form') { await send('/company',v); window.wagonhubAnalytics?.goal('company_created'); toast('Компания создана'); location.hash='account'; }
-  } catch(error) { toast(error.message,true); } finally { button.disabled=false; }
+  } catch(error) {
+    if (form.id==='reset-form') { const errorNode=form.querySelector('#reset-error'); if (errorNode) errorNode.textContent=error.message; }
+    else toast(error.message,true);
+  } finally { button.disabled=false; }
 }
 async function handleClick(e) {
   const target=e.target.closest('button'); if (!target) return;
   try {
     if (target.id==='retry') await render();
+    if (target.id==='reset-start') {
+      recovery={step:'email',email:recovery.email,token:null};
+      renderRecovery();
+    }
+    if (target.id==='reset-resend' && recovery.step==='code') {
+      target.disabled=true;
+      const feedback=document.querySelector('#reset-error');
+      try {
+        await send('/password-reset/request',{email:recovery.email});
+        feedback.textContent='Если прошло не менее минуты, новый код отправлен.';
+      } catch(error) { feedback.textContent=error.message; }
+      finally { target.disabled=false; }
+    }
     if (target.id==='clear-filters') { state.filters={}; state.before=null; state.cursors=[]; await render(); }
     if (target.id==='catalog-next' && state.next) { state.cursors.push(state.before); state.before=state.next; await render(); }
     if (target.id==='catalog-prev' && state.cursors.length) { state.before=state.cursors.pop(); await render(); }
