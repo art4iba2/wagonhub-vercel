@@ -1,13 +1,14 @@
 """FastAPI API and single-page frontend for wagon-space rental."""
 import hashlib
 import hmac
+import os
 import secrets
 from contextlib import asynccontextmanager, closing
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query
-from fastapi.responses import FileResponse
+from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 
 from . import db
@@ -74,7 +75,11 @@ def listing_dict(row):
 
 @app.get('/')
 def index():
-    return FileResponse(STATIC / 'index.html')
+    counter_id = os.environ.get('YANDEX_METRIKA_ID', '').strip()
+    if counter_id and (not counter_id.isascii() or not counter_id.isdecimal() or len(counter_id) > 12 or int(counter_id) == 0):
+        raise RuntimeError('YANDEX_METRIKA_ID должен содержать только цифры (до 12 знаков)')
+    html = (STATIC / 'index.html').read_text(encoding='utf-8')
+    return HTMLResponse(html.replace('__YANDEX_METRIKA_ID__', counter_id or 'null'))
 
 
 @app.post('/api/register', status_code=201)

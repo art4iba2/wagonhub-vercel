@@ -33,6 +33,9 @@ def company(client, headers, inn='1234567890'):
 def test_frontend_and_auth(client):
     assert client.get('/').status_code == 200
     assert 'ВагонМесто' in client.get('/').text
+    assert 'data-goal="landing_find_places"' in client.get('/static/app.js').text
+    assert 'window.WAGONHUB_METRIKA_ID=null' in client.get('/').text
+    assert 'mc.yandex.ru/metrika/tag.js' in client.get('/static/analytics.js').text
     assert client.get('/static/app.js').status_code == 200
     assert client.get('/api/me').status_code == 401
     track = register(client, 'track', 'track@example.com')
@@ -48,6 +51,17 @@ def test_frontend_and_auth(client):
     assert client.post('/api/logout', headers=track).status_code == 204
     assert client.get('/api/me', headers=track).status_code == 401
     assert client.get('/api/me', headers={'Authorization': 'Bearer '+login.json()['token']}).status_code == 200
+
+
+def test_metrika_configuration(client, monkeypatch):
+    monkeypatch.setenv('YANDEX_METRIKA_ID', '12345678')
+    response = client.get('/')
+    assert response.status_code == 200
+    assert 'window.WAGONHUB_METRIKA_ID=12345678' in response.text
+    assert '__YANDEX_METRIKA_ID__' not in response.text
+    monkeypatch.setenv('YANDEX_METRIKA_ID', '12</script>')
+    with pytest.raises(RuntimeError, match='YANDEX_METRIKA_ID'):
+        client.get('/')
 
 
 def test_roles_companies_and_validation(client):
