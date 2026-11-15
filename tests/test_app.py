@@ -384,3 +384,31 @@ def test_expired_links_and_private_pages(client, monkeypatch):
     assert client.post('/api/register', json={**data, 'name': 'Участник',
                        'password': 'securepassword', 'invite_token': first['token']}).status_code == 403
     assert client.post('/api/admin/invites', json=data, headers=admin).status_code == 201
+
+
+def test_multiple_admins_and_revoking_one_without_removing_account(client, monkeypatch):
+    first = register(client, 'track', 'first@example.com')
+    legacy = register(client, 'track', 'legacy@example.com')
+    ordinary = register(client, 'track', 'member@example.com')
+    monkeypatch.setenv('PILOT_ADMIN_EMAIL', 'legacy@example.com')
+    monkeypatch.setenv('PILOT_ADMIN_EMAILS', ' First@example.com, , SECOND@example.com ')
+    monkeypatch.setenv('PILOT_INVITES_JSON', '{"first@example.com":{"role":"track","code":"AAAAAAAAAAAAAAAAAAAAAAAAAAAA"},'
+                       '"second@example.com":{"role":"track","code":"BBBBBBBBBBBBBBBBBBBBBBBBBBBB"},'
+                       '"legacy@example.com":{"role":"track","code":"CCCCCCCCCCCCCCCCCCCCCCCCCCCC"},'
+                       '"member@example.com":{"role":"track","code":"DDDDDDDDDDDDDDDDDDDDDDDDDDDD"}}')
+    monkeypatch.setattr(security, 'production', lambda: True)
+    second_payload = {'name':'Второй администратор', 'email':'second@example.com',
+                      'role':'track', 'password':'securepassword'}
+    assert client.post('/api/register', json=second_payload).status_code == 403
+    second = client.post('/api/register', json={**second_payload, 'invite_code':'B'*28})
+    assert second.status_code == 201 and second.json()['user']['is_admin'] is True
+    second_headers = session_header(second)
+    assert client.get('/api/admin/invites', headers=first).status_code == 200
+    assert client.post('/api/admin/invites', headers=second_headers,
+                       json={'email':'participant@example.com','role':'track'}).status_code == 201
+    assert client.get('/api/admin/invites', headers=legacy).status_code == 403
+    assert client.get('/api/admin/invites', headers=ordinary).status_code == 403
+    monkeypatch.setenv('PILOT_ADMIN_EMAILS', 'first@example.com')
+    assert client.get('/api/admin/invites', headers=second_headers).status_code == 403
+    assert client.get('/api/me', headers=second_headers).json()['is_admin'] is False
+    assert client.get('/api/admin/invites', headers=first).status_code == 200

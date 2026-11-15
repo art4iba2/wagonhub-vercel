@@ -16,12 +16,16 @@ def production():
     return os.getenv('APP_ENV') == 'production' or bool(os.getenv('VERCEL'))
 
 
-def admin_email():
-    return os.getenv('PILOT_ADMIN_EMAIL', '').strip().lower()
+def admin_emails():
+    configured = os.getenv('PILOT_ADMIN_EMAILS', '').strip()
+    if configured:
+        return frozenset(email.strip().lower() for email in configured.split(',') if email.strip())
+    legacy = os.getenv('PILOT_ADMIN_EMAIL', '').strip().lower()
+    return frozenset((legacy,)) if legacy else frozenset()
 
 
 def is_admin(user):
-    return bool(admin_email() and user['email'] == admin_email())
+    return user['email'] in admin_emails()
 
 
 def invitations():
@@ -49,14 +53,14 @@ def allowed_signup(email, role, code):
         entry['code'].encode(), code.encode()))
 
 
-def throttle(action, request, email):
+def throttle(action, request, email, *, ip_limit=30, email_limit=8):
     # Trust proxy headers only from the proxy addresses configured in Uvicorn.
     ip = request.client.host if request.client else 'unknown'
     bucket = int(time.time()) // 600
     reached = False
     with db.transaction() as con:
         con.execute('DELETE FROM auth_limits WHERE bucket < ?', (bucket - 1,))
-        for key, maximum in ((f'{action}:ip:{ip}', 30), (f'{action}:email:{email}', 8)):
+        for key, maximum in ((f'{action}:ip:{ip}', ip_limit), (f'{action}:email:{email}', email_limit)):
             row = con.execute('''INSERT INTO auth_limits(key,bucket,attempts) VALUES (?,?,1)
                 ON CONFLICT(key,bucket) DO UPDATE SET attempts=auth_limits.attempts+1
                 RETURNING attempts''', (key, bucket)).fetchone()

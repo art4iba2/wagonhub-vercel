@@ -82,3 +82,16 @@ class AdminInviteIn(BaseModel):
         if self.role == 'track' and self.inn is not None:
             raise ValueError('ИНН нужен только для владельца вагонов')
         return self
+
+
+class ResetRequest(BaseModel):
+    email: EmailStr
+
+
+class ResetVerify(ResetRequest):
+    code: str = Field(pattern=r'^[0-9]{8}$')
+
+
+class ResetComplete(ResetRequest):
+    token: str = Field(pattern=r'^[A-Za-z0-9_-]{43}$')
+    password: str = Field(min_length=8, max_length=128)
