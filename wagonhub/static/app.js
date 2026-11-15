@@ -26,15 +26,16 @@ const values = form => Object.fromEntries(new FormData(form).entries());
 function pageHeading(title, description) { return `<div class="page-heading"><h1>${title}</h1><p>${description}</p></div>`; }
 function empty(title, description, action='') { return `<div class="empty"><div class="symbol">◇</div><h3>${title}</h3><p>${description}</p>${action}</div>`; }
 function refreshNav() {
-  const page=location.hash.slice(1).split('?')[0]||'listings';
+  const page=location.hash.slice(1).split('?')[0]||'home';
   document.querySelectorAll('[data-nav]').forEach(a=>a.classList.toggle('active',a.dataset.nav===page));
   document.querySelector('#create-link').hidden=state.user?.role!=='track';
-  document.querySelector('#auth-actions').innerHTML=state.user ? `<button class="btn ghost small" id="logout">Выйти</button>` : `<a class="btn small" href="#login">Войти</a>`;
+  document.querySelector('#auth-actions').innerHTML=state.user ? `<button class="btn ghost small" id="logout">Выйти</button>` : `<a class="btn small" href="#login" data-goal="open_login">Войти</a>`;
 }
 async function render() {
   refreshNav();
-  const page=location.hash.slice(1).split('?')[0]||'listings';
+  const page=location.hash.slice(1).split('?')[0]||'home';
   try {
+    if (page==='home') return renderHome();
     if (page==='listings') return await renderListings();
     if (page==='login'||page==='register') return renderAuth(page);
     if (!state.user) { location.hash='login'; return; }
@@ -42,8 +43,13 @@ async function render() {
     if (page==='create'&&state.user.role==='track') return renderCreate();
     if (/^edit\/\d+$/.test(page)&&state.user.role==='track') return await renderEdit(Number(page.split('/')[1]));
     if (page==='company'&&state.user.role==='wagon') return await renderCompany();
-    location.hash='listings';
+    location.hash='home';
   } catch(error) { app.innerHTML=empty('Не удалось загрузить страницу',escapeHtml(error.message),'<button class="btn" id="retry">Повторить</button>'); }
+}
+function renderHome() {
+  app.innerHTML=`<section class="landing-hero"><div><span class="eyebrow">Площадка для железнодорожной логистики</span><h1>Место для вагонов.<br>Заявка без цепочки звонков.</h1><p>Владельцы путей размещают свободные места и условия. Операторы сравнивают предложения и отправляют заявку прямо на сайте.</p><div class="landing-actions"><a class="btn" href="#listings" data-goal="landing_find_places">Найти место отстоя</a><a class="btn secondary" href="#register?role=track" data-goal="landing_register_track">Разместить площадку</a></div></div><div class="landing-aside"><span>01 / Предложение</span><strong>Площадка и цена</strong><span>02 / Поиск</span><strong>Город и вместимость</strong><span>03 / Заявка</span><strong>Ответ владельца пути</strong></div></section>
+  <section class="landing-section"><div class="section-heading"><div><h2>Как работает сервис</h2><p>Две роли и понятный порядок действий</p></div></div><div class="landing-steps"><article><span>01</span><h3>Публикация</h3><p>Владелец пути указывает адрес, вместимость, цену и условия размещения.</p></article><article><span>02</span><h3>Выбор</h3><p>Оператор ищет площадку по городу, свободным местам и цене.</p></article><article><span>03</span><h3>Решение</h3><p>Владелец пути видит данные заявителя и подтверждает или отклоняет запрос.</p></article></div></section>
+  <section class="landing-end"><div><h2>Начните с доступных предложений</h2><p>Посмотрите площадки или создайте аккаунт для размещения объявления.</p></div><div class="landing-actions"><a class="btn" href="#listings" data-goal="landing_find_places">Открыть каталог</a><a class="btn secondary" href="#register" data-goal="landing_register_wagon">Создать аккаунт</a></div></section>`;
 }
 async function renderListings() {
   const qs=new URLSearchParams(Object.entries(state.filters).filter(([,v])=>v));
@@ -51,15 +57,16 @@ async function renderListings() {
   const city=escapeHtml(state.filters.city||'');
   app.innerHTML=`<section class="hero"><div class="hero-content"><div class="eyebrow">Инфраструктура рядом</div><h1>Место для ваших вагонов начинается здесь.</h1><p>Находите свободные пути, сравнивайте условия и отправляйте заявку владельцу площадки.</p><div class="hero-stat"><div><strong>${items.length}</strong> предложений по запросу</div><div><strong>24/7</strong> доступ к площадке</div></div></div></section>
   <div class="section-heading"><div><h2>Актуальные предложения</h2><p>Свободные вагоно-места от владельцев путей</p></div></div>
-  <div class="layout"><aside class="panel"><h3>Найти площадку</h3><form id="filters"><div class="field"><label for="city">Город</label><input id="city" name="city" placeholder="Например, Москва" value="${city}"></div><div class="field"><label for="capacity">Количество вагонов от</label><input id="capacity" name="min_capacity" type="number" min="1" value="${escapeHtml(state.filters.min_capacity||'') }" placeholder="Любое"></div><div class="field"><label for="max_price">Цена за вагон до, ₽</label><input id="max_price" name="max_price" type="number" min="1" step="0.01" value="${escapeHtml(state.filters.max_price||'')}" placeholder="Без ограничения"></div><div class="filter-actions"><button class="btn" type="submit">Показать</button><button class="btn ghost" type="button" id="clear-filters">Сбросить</button></div></form></aside>
+  <div class="layout"><aside class="panel"><h3>Найти площадку</h3><form id="filters"><div class="field"><label for="city">Город</label><input id="city" name="city" placeholder="Например, Москва" value="${city}"></div><div class="field"><label for="capacity">Количество вагонов от</label><input id="capacity" name="min_capacity" type="number" min="1" value="${escapeHtml(state.filters.min_capacity||'') }" placeholder="Любое"></div><div class="field"><label for="max_price">Цена за вагон до, ₽</label><input id="max_price" name="max_price" type="number" min="1" step="0.01" value="${escapeHtml(state.filters.max_price||'')}" placeholder="Без ограничения"></div><div class="filter-actions"><button class="btn" type="submit">Показать</button><button class="btn ghost" type="button" id="clear-filters" data-goal="clear_filters">Сбросить</button></div></form></aside>
   <div class="results">${items.length ? items.map(listingCard).join('') : empty('Пока нет предложений','Попробуйте изменить фильтры или загляните позже.')}</div></div>`;
 }
 function listingCard(x, mine=false) {
-  return `<article class="card"><div><span class="tag ${x.status==='available'?'dark':''}">${statuses[x.status]}</span><h3>${escapeHtml(x.title)}</h3><div class="location">⌖ ${escapeHtml(x.city)} · ${escapeHtml(x.address)}</div><p>${escapeHtml(x.description||'Площадка для размещения вагонов. Подробности уточняйте у владельца.')}</p><div class="tags"><span class="tag">${x.free_capacity} из ${x.capacity} мест свободно</span><span class="tag">${escapeHtml(x.owner_name)}</span></div></div><div class="price"><strong>${money(x.price)}</strong><small>за вагон</small></div><div class="card-bottom"><span class="hint">${mine?'Ваше объявление':'Заявка будет отправлена владельцу пути на подтверждение'}</span>${mine ? `<div class="deal-actions"><button class="btn small" type="button" data-edit="${x.id}">Редактировать объявление</button>${x.status==='available'?`<button class="btn secondary small" data-withdraw="${x.id}">Снять объявление</button>`:''}</div>` : state.user?.role==='wagon'?`<button class="btn small" data-request="${x.id}" data-free="${x.free_capacity}">Отправить заявку</button>` : !state.user?'<a class="btn small" href="#login">Войти и откликнуться</a>':''}</div></article>`;
+  return `<article class="card"><div><span class="tag ${x.status==='available'?'dark':''}">${statuses[x.status]}</span><h3>${escapeHtml(x.title)}</h3><div class="location">⌖ ${escapeHtml(x.city)} · ${escapeHtml(x.address)}</div><p>${escapeHtml(x.description||'Площадка для размещения вагонов. Подробности уточняйте у владельца.')}</p><div class="tags"><span class="tag">${x.free_capacity} из ${x.capacity} мест свободно</span><span class="tag">${escapeHtml(x.owner_name)}</span></div></div><div class="price"><strong>${money(x.price)}</strong><small>за вагон</small></div><div class="card-bottom"><span class="hint">${mine?'Ваше объявление':'Заявка будет отправлена владельцу пути на подтверждение'}</span>${mine ? `<div class="deal-actions"><button class="btn small" type="button" data-edit="${x.id}" data-goal="edit_listing_click">Редактировать объявление</button>${x.status==='available'?`<button class="btn secondary small" data-withdraw="${x.id}">Снять объявление</button>`:''}</div>` : state.user?.role==='wagon'?`<button class="btn small" data-request="${x.id}" data-free="${x.free_capacity}" data-goal="request_click">Отправить заявку</button>` : !state.user?'<a class="btn small" href="#login" data-goal="request_login_click">Войти и откликнуться</a>':''}</div></article>`;
 }
 function renderAuth(page) {
   const signup=page==='register';
-  app.innerHTML=`<div class="auth-wrap"><div class="form-card"><div class="eyebrow">ВагонМесто</div><h1>${signup?'Создать аккаунт':'С возвращением'}</h1><p>${signup?'Выберите роль, чтобы открыть нужные инструменты.':'Войдите, чтобы работать с объявлениями и заявками.'}</p><form id="auth-form">${signup?`<div class="field"><label>Ваше имя</label><input name="name" required minlength="2" maxlength="100" autocomplete="name"></div>`:''}<div class="field"><label>Email</label><input name="email" type="email" required autocomplete="email"></div><div class="field"><label>Пароль</label><input name="password" type="password" required minlength="${signup?8:1}" autocomplete="${signup?'new-password':'current-password'}"></div>${signup?`<div class="field"><label>Тип аккаунта</label><select name="role"><option value="wagon">Владелец вагонов</option><option value="track">Владелец путей</option></select></div>`:''}<button class="btn" type="submit">${signup?'Зарегистрироваться':'Войти'}</button></form><div class="auth-switch">${signup?'Уже есть аккаунт? <a href="#login">Войти</a>':'Нет аккаунта? <a href="#register">Зарегистрироваться</a>'}</div></div></div>`;
+  const trackSignup=new URLSearchParams(location.hash.split('?')[1]||'').get('role')==='track';
+  app.innerHTML=`<div class="auth-wrap"><div class="form-card"><div class="eyebrow">ВагонМесто</div><h1>${signup?'Создать аккаунт':'С возвращением'}</h1><p>${signup?'Выберите роль, чтобы открыть нужные инструменты.':'Войдите, чтобы работать с объявлениями и заявками.'}</p><form id="auth-form">${signup?`<div class="field"><label>Ваше имя</label><input name="name" required minlength="2" maxlength="100" autocomplete="name"></div>`:''}<div class="field"><label>Email</label><input name="email" type="email" required autocomplete="email"></div><div class="field"><label>Пароль</label><input name="password" type="password" required minlength="${signup?8:1}" autocomplete="${signup?'new-password':'current-password'}"></div>${signup?`<div class="field"><label>Тип аккаунта</label><select name="role"><option value="wagon" ${trackSignup?'':'selected'}>Владелец вагонов</option><option value="track" ${trackSignup?'selected':''}>Владелец путей</option></select></div>`:''}<button class="btn" type="submit">${signup?'Зарегистрироваться':'Войти'}</button></form><div class="auth-switch">${signup?'Уже есть аккаунт? <a href="#login">Войти</a>':'Нет аккаунта? <a href="#register">Зарегистрироваться</a>'}</div></div></div>`;
 }
 async function renderAccount() {
   const user=state.user;
@@ -95,17 +102,17 @@ async function handleSubmit(e) {
   const form=e.target; if (!['auth-form','filters','listing-form','company-form'].includes(form.id)) return;
   e.preventDefault(); const v=values(form); const button=form.querySelector('[type=submit]'); button.disabled=true;
   try {
-    if (form.id==='filters') { state.filters=Object.fromEntries(Object.entries(v).filter(([,value])=>value)); await render(); }
-    if (form.id==='auth-form') { const result=await send(location.hash==='#register'?'/register':'/login',v); state.token=result.token; state.user=result.user; localStorage.setItem('wagonhub_token',result.token); location.hash='account'; toast('Вы вошли в аккаунт'); }
+    if (form.id==='filters') { state.filters=Object.fromEntries(Object.entries(v).filter(([,value])=>value)); window.wagonhubAnalytics?.goal('filters_submit'); await render(); }
+    if (form.id==='auth-form') { const signup=location.hash.startsWith('#register'); const result=await send(signup?'/register':'/login',v); state.token=result.token; state.user=result.user; localStorage.setItem('wagonhub_token',result.token); window.wagonhubAnalytics?.goal(signup?'registration_success':'login_success'); location.hash='account'; toast('Вы вошли в аккаунт'); }
     if (form.id==='listing-form') {
       const payload={...v,capacity:Number(v.capacity)};
       if (form.dataset.listingId) {
         await api(`/listings/${form.dataset.listingId}`,{method:'PUT',body:JSON.stringify(payload)});
-        toast('Объявление обновлено');
-      } else { await send('/listings',payload); toast('Объявление опубликовано'); }
+        window.wagonhubAnalytics?.goal('listing_updated'); toast('Объявление обновлено');
+      } else { await send('/listings',payload); window.wagonhubAnalytics?.goal('listing_created'); toast('Объявление опубликовано'); }
       location.hash='account';
     }
-    if (form.id==='company-form') { await send('/company',v); toast('Компания создана'); location.hash='account'; }
+    if (form.id==='company-form') { await send('/company',v); window.wagonhubAnalytics?.goal('company_created'); toast('Компания создана'); location.hash='account'; }
   } catch(error) { toast(error.message,true); } finally { button.disabled=false; }
 }
 async function handleClick(e) {
@@ -115,14 +122,14 @@ async function handleClick(e) {
     if (target.id==='clear-filters') { state.filters={}; await render(); }
     if (target.dataset.edit) location.hash=`edit/${target.dataset.edit}`;
     if (target.id==='logout') { await api('/logout',{method:'POST'}); state.token=null; state.user=null; localStorage.removeItem('wagonhub_token'); location.hash='listings'; await render(); }
-    if (target.dataset.withdraw) { if (!confirm('Снять объявление? Ожидающие заявки будут отклонены.')) return; await send(`/listings/${target.dataset.withdraw}/withdraw`,{}); toast('Объявление снято'); await render(); }
+    if (target.dataset.withdraw) { if (!confirm('Снять объявление? Ожидающие заявки будут отклонены.')) return; await send(`/listings/${target.dataset.withdraw}/withdraw`,{}); window.wagonhubAnalytics?.goal('listing_withdrawn'); toast('Объявление снято'); await render(); }
     if (target.dataset.request) {
       const wagons=prompt(`Сколько вагонов разместить? Свободно: ${target.dataset.free}`,'1');
       if (wagons===null) return;
       const count=Number(wagons); if (!Number.isInteger(count)||count<1) throw new Error('Укажите целое число вагонов больше нуля');
-      await send('/deals',{listing_id:Number(target.dataset.request),wagons:count}); toast('Заявка отправлена'); location.hash='account';
+      await send('/deals',{listing_id:Number(target.dataset.request),wagons:count}); window.wagonhubAnalytics?.goal('request_sent'); toast('Заявка отправлена'); location.hash='account';
     }
-    if (target.dataset.decision) { await send(`/deals/${target.dataset.decision}/decision`,{status:target.dataset.status}); toast('Решение сохранено'); await render(); }
+    if (target.dataset.decision) { await send(`/deals/${target.dataset.decision}/decision`,{status:target.dataset.status}); window.wagonhubAnalytics?.goal(target.dataset.status==='confirmed'?'request_confirmed':'request_rejected'); toast('Решение сохранено'); await render(); }
   } catch(error) { toast(error.message,true); }
 }
 document.addEventListener('submit',handleSubmit);

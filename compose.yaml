@@ -1,6 +1,8 @@
 services:
   web:
     build: .
+    environment:
+      YANDEX_METRIKA_ID: ${YANDEX_METRIKA_ID:-}
     ports:
       - "8000:8000"
     volumes:

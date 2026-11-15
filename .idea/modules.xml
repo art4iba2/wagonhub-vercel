@@ -2,7 +2,7 @@
 <project version="4">
   <component name="ProjectModuleManager">
     <modules>
-      <module fileurl="file://$PROJECT_DIR$/.idea/wagonhub-vercel.iml" filepath="$PROJECT_DIR$/.idea/wagonhub-vercel.iml" />
+      <module fileurl="file://$PROJECT_DIR$/.idea/wagonhub-mvp.iml" filepath="$PROJECT_DIR$/.idea/wagonhub-mvp.iml" />
     </modules>
   </component>
 </project>
