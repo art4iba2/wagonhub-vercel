@@ -12,8 +12,8 @@ from fastapi import Body, Depends, FastAPI, HTTPException, Query, Request, Respo
 from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 
-from . import db, security
-from .schemas import CompanyIn, DealIn, Decision, ListingIn, Login, NotificationReceipt, Register
+from . import db, invites, security
+from .schemas import AdminInviteIn, CompanyIn, DealIn, Decision, ListingIn, Login, NotificationReceipt, Register
 
 STATIC = Path(__file__).parent / 'static'
 LOGGER = logging.getLogger(__name__)
@@ -43,7 +43,7 @@ def password_hash(password, salt):
 
 
 def public_user(row):
-    return {key: row[key] for key in ('id', 'name', 'email', 'role')}
+    return {**{key: row[key] for key in ('id', 'name', 'email', 'role')}, 'is_admin': security.is_admin(row)}
 
 
 def issue_token(con, user_id):
@@ -65,14 +65,19 @@ def current_user(request: Request):
         row = con.execute('''SELECT u.* FROM sessions s JOIN users u ON u.id=s.user_id
                              WHERE s.token_hash=? AND s.expires_at>?''',
                           (digest, datetime.now(timezone.utc).isoformat())).fetchone()
-    if not row or not pilot_member(row):
-        fail(401, 'Сессия недействительна. Войдите снова')
+        if not row or not pilot_member(con, row):
+            fail(401, 'Сессия недействительна. Войдите снова')
     return dict(row)
 
 
-def pilot_member(user):
-    return (not security.production()
-            or security.invitations().get(user['email'], {}).get('role') == user['role'])
+def pilot_member(con, user):
+    return not security.production() or invites.membership(con, user) is not None
+
+
+def require_admin(user=Depends(current_user)):
+    if not security.is_admin(user):
+        fail(403, 'Раздел доступен только администратору')
+    return user
 
 
 def require_browser_header(request: Request):
@@ -99,18 +104,36 @@ def listing_dict(row):
     return data
 
 
-@app.get('/')
-def index():
+def page(*, private_page=False):
     raw_id = os.environ.get('YANDEX_METRIKA_ID', '').strip()
     counter_id = 'null'
-    if raw_id:
+    if raw_id and not private_page:
         if raw_id.isascii() and raw_id.isdecimal() and len(raw_id) <= 12 and int(raw_id) > 0:
             counter_id = str(int(raw_id))
         else:
             LOGGER.warning('Некорректный YANDEX_METRIKA_ID: аналитика отключена')
     html = (STATIC / 'index.html').read_text(encoding='utf-8')
-    return HTMLResponse(html.replace('__YANDEX_METRIKA_ID__', counter_id)
-                        .replace('__PILOT_INVITE_REQUIRED__', str(security.production()).lower()))
+    html = html.replace('__YANDEX_METRIKA_ID__', counter_id).replace(
+        '__PILOT_INVITE_REQUIRED__', str(security.production()).lower()).replace(
+        '__PILOT_ADMIN_ENABLED__', str(bool(security.admin_email())).lower())
+    headers = {'Cache-Control': 'no-store', 'Referrer-Policy': 'no-referrer'} if private_page else None
+    return HTMLResponse(html, headers=headers)
+
+
+@app.get('/')
+def index():
+    return page()
+
+
+@app.get('/invite', include_in_schema=False)
+def invite_page():
+    # No analytics scripts can initialize on the invitation landing page.
+    return page(private_page=True)
+
+
+@app.get('/admin', include_in_schema=False)
+def admin_page():
+    return page(private_page=True)
 
 
 @app.post('/api/register', status_code=201)
@@ -118,19 +141,28 @@ def register(payload: Register, request: Request, response: Response):
     require_browser_header(request)
     email = str(payload.email).lower()
     security.throttle('register', request, email)
-    if security.production() and not security.allowed_signup(email, payload.role, payload.invite_code):
+    master_signup = bool(security.admin_email() and email == security.admin_email())
+    if (master_signup or (security.production() and payload.invite_token is None)) and not (
+            security.allowed_signup(email, payload.role, payload.invite_code)):
         fail(403, 'Проверьте email, роль и код приглашения')
     salt = secrets.token_hex(16)
     digest = password_hash(payload.password, salt)
     try:
         with db.transaction() as con:
+            claim = None
+            if payload.invite_token is not None:
+                claim = invites.claim(con, email, payload.role, payload.invite_token)
+                if claim is None:
+                    fail(403, 'Ссылка недействительна, истекла или не подходит для этого email и роли')
             user_id = db.insert_id(con, 'INSERT INTO users(name,email,role,salt,password_hash) VALUES (?,?,?,?,?)',
                                    (payload.name, email, payload.role, salt, digest))
+            if claim:
+                invites.assign(con, claim['id'], user_id)
             token = issue_token(con, user_id)
     except db.INTEGRITY_ERRORS:
         fail(409, 'Этот email уже зарегистрирован')
     set_session(response, token)
-    return {'user': {'id': user_id, 'name': payload.name, 'email': email, 'role': payload.role}}
+    return {'user': public_user({'id': user_id, 'name': payload.name, 'email': email, 'role': payload.role})}
 
 
 @app.post('/api/login')
@@ -140,8 +172,9 @@ def login(payload: Login, request: Request, response: Response):
     security.throttle('login', request, email)
     with closing(db.connect()) as con:
         row = con.execute('SELECT * FROM users WHERE email=?', (email,)).fetchone()
+        member = row is not None and pilot_member(con, row)
     digest = password_hash(payload.password, row['salt'] if row else '0' * 32)
-    if not row or not hmac.compare_digest(row['password_hash'], digest) or not pilot_member(row):
+    if not row or not hmac.compare_digest(row['password_hash'], digest) or not member:
         fail(401, 'Неверный email или пароль')
     with db.transaction() as con:
         token = issue_token(con, row['id'])
@@ -165,12 +198,12 @@ def me(user=Depends(current_user)):
 @app.post('/api/company', status_code=201)
 def create_company(payload: CompanyIn, user=Depends(current_user)):
     require_role(user, 'wagon')
-    if security.production():
-        invite = security.invitations().get(user['email'], {})
-        if invite.get('role') != 'wagon' or str(invite.get('inn')) != payload.inn:
-            fail(403, 'Используйте ИНН компании, согласованный для пилота')
     try:
         with db.transaction() as con:
+            invite = invites.membership(con, user)
+            if (security.production() or invite is not None) and (
+                    invite is None or str(invite.get('inn')) != payload.inn):
+                fail(403, 'Используйте ИНН компании, согласованный для пилота')
             company_id = db.insert_id(con, 'INSERT INTO companies(user_id,name,inn,email,phone) VALUES (?,?,?,?,?)',
                                       (user['id'], payload.name, payload.inn, str(payload.email), payload.phone.strip()))
     except db.INTEGRITY_ERRORS:
@@ -394,3 +427,30 @@ def health():
     except (db.psycopg.Error, db.sqlite3.Error):
         fail(503, 'База данных недоступна')
     return {'status': 'ok'}
+
+
+@app.get('/api/admin/invites')
+def admin_invites(response: Response, user=Depends(require_admin)):
+    response.headers['Cache-Control'] = 'no-store'
+    with closing(db.connect()) as con:
+        return invites.recent(con)
+
+
+@app.post('/api/admin/invites', status_code=201)
+def admin_create_invite(payload: AdminInviteIn, response: Response, user=Depends(require_admin)):
+    email = str(payload.email).lower()
+    if email == security.admin_email() or email in security.invitations():
+        fail(409, 'Этот адрес уже настроен в списке приглашённых')
+    with db.transaction() as con:
+        invite = invites.issue(con, user['id'], email, payload.role, payload.inn)
+    if not invite:
+        fail(409, 'Аккаунт или действующее приглашение для этого email уже есть')
+    response.headers['Cache-Control'] = 'no-store'
+    return {**invite, 'role': payload.role}
+
+
+@app.post('/api/admin/invites/{invite_id}/revoke', status_code=204)
+def admin_revoke_invite(invite_id: str, user=Depends(require_admin)):
+    with db.transaction() as con:
+        if not invites.revoke(con, invite_id):
+            fail(409, 'Можно отозвать только действующее неиспользованное приглашение')

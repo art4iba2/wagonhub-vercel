@@ -1,7 +1,7 @@
 """Validation for public API payloads."""
 from decimal import Decimal
 from typing import Literal
-from pydantic import BaseModel, EmailStr, Field, field_validator
+from pydantic import BaseModel, EmailStr, Field, field_validator, model_validator
 
 
 def clean(value: str) -> str:
@@ -17,6 +17,7 @@ class Register(BaseModel):
     password: str = Field(min_length=8, max_length=128)
     role: Literal['track', 'wagon']
     invite_code: str = Field(default='', max_length=128)
+    invite_token: str | None = Field(default=None, pattern=r'^[A-Za-z0-9_-]{43}$')
 
     @field_validator('name')
     @classmethod
@@ -67,3 +68,17 @@ class Decision(BaseModel):
 class NotificationReceipt(BaseModel):
     deal_id: int = Field(gt=0, le=9223372036854775807)
     event: Literal['pending', 'confirmed', 'rejected', 'completed']
+
+
+class AdminInviteIn(BaseModel):
+    email: EmailStr
+    role: Literal['track', 'wagon']
+    inn: str | None = Field(default=None, pattern=r'^(?:[0-9]{10}|[0-9]{12})$')
+
+    @model_validator(mode='after')
+    def require_inn_for_wagons(self):
+        if self.role == 'wagon' and not self.inn:
+            raise ValueError('Укажите ИНН для владельца вагонов')
+        if self.role == 'track' and self.inn is not None:
+            raise ValueError('ИНН нужен только для владельца вагонов')
+        return self

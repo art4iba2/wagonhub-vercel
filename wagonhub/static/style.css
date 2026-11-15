@@ -5,3 +5,5 @@
 @media(max-width:850px){.landing-hero{grid-template-columns:1fr;padding:45px 35px}.landing-aside{border-left:0;border-top:1px solid #ffffff45;padding:22px 0 0;grid-template-columns:1fr 1fr}.landing-aside strong{margin-bottom:12px}.landing-end{display:block}.landing-end .landing-actions{margin-top:20px}}
 @media(max-width:560px){.landing-hero{padding:36px 25px}.landing-hero h1{font-size:36px}.landing-steps{grid-template-columns:1fr;gap:25px}.landing-aside{display:block}.landing-aside span,.landing-aside strong{display:block}.landing-end{padding:28px 23px}.analytics-consent{left:12px;right:12px;bottom:12px}}
 @media(max-width:560px){.nav nav{justify-content:flex-start;flex-wrap:wrap}.landing-actions .btn{width:100%}}
+
+#admin-link[hidden], #invite-inn-field[hidden]{display:none}.invite-result{margin-top:20px}.invite-result .field{margin:12px 0}

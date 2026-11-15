@@ -141,6 +141,17 @@ CREATE TABLE IF NOT EXISTS auth_limits (
  PRIMARY KEY(key,bucket)
 );
 CREATE INDEX IF NOT EXISTS idx_auth_limits_bucket ON auth_limits(bucket);
+CREATE TABLE IF NOT EXISTS pilot_invites (
+ id TEXT PRIMARY KEY, email TEXT NOT NULL,
+ role TEXT NOT NULL CHECK(role IN ('track','wagon')), inn TEXT,
+ token_hash TEXT NOT NULL UNIQUE, created_at BIGINT NOT NULL, expires_at BIGINT NOT NULL,
+ created_by BIGINT NOT NULL REFERENCES users(id), claimed_at BIGINT,
+ claimed_user_id BIGINT UNIQUE REFERENCES users(id), revoked_at BIGINT,
+ CHECK((role='track' AND inn IS NULL) OR (role='wagon' AND inn IS NOT NULL))
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_pilot_invites_pending_email ON pilot_invites(email)
+ WHERE claimed_at IS NULL AND revoked_at IS NULL;
+
 """
 
 

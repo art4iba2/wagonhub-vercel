@@ -2,6 +2,8 @@ services:
   web:
     build: .
     environment:
+      PILOT_ADMIN_EMAIL: ${PILOT_ADMIN_EMAIL:-}
+      PILOT_INVITES_JSON: ${PILOT_INVITES_JSON:-}
       YANDEX_METRIKA_ID: ${YANDEX_METRIKA_ID:-}
     ports:
       - "127.0.0.1:8000:8000"
