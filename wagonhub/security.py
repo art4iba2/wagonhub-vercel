@@ -16,8 +16,16 @@ def production():
     return os.getenv('APP_ENV') == 'production' or bool(os.getenv('VERCEL'))
 
 
+def admin_email():
+    return os.getenv('PILOT_ADMIN_EMAIL', '').strip().lower()
+
+
+def is_admin(user):
+    return bool(admin_email() and user['email'] == admin_email())
+
+
 def invitations():
-    raw = os.getenv('PILOT_INVITES_JSON', '{}')
+    raw = os.getenv('PILOT_INVITES_JSON', '').strip() or '{}'
     try:
         data = json.loads(raw)
         if not isinstance(data, dict):

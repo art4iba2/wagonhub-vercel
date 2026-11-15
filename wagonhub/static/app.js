@@ -1,6 +1,14 @@
+// Invitation fragments are removed before rendering. Their values live only in memory.
+let linkInvite = null;
+if (location.pathname === '/invite') {
+  const link = /^#([A-Za-z0-9_-]{43})\/(track|wagon)$/.exec(location.hash);
+  if (link) linkInvite = { token: link[1], role: link[2] };
+  history.replaceState(null, '', '/#register' + (link ? '?role=' + link[2] : '?invalid_invite=1'));
+}
+
 const app = document.querySelector('#app');
 localStorage.removeItem('wagonhub_token');
-const state = { user: null, filters: {}, before: null, next: null, cursors: [], alerts: [] };
+const state = { user: null, filters: {}, before: null, next: null, cursors: [], alerts: [], newInvite: null };
 const escapeHtml = value => String(value ?? '').replace(/[&<>"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));
 const money = value => new Intl.NumberFormat('ru-RU', {style:'currency',currency:'RUB',maximumFractionDigits:2}).format(value);
 const roles = {track:'Владелец путей',wagon:'Владелец вагонов'};
@@ -16,7 +24,7 @@ async function api(path, options={}) {
   if (response.status===204) return null;
   const data=await response.json().catch(()=>null);
   if (!response.ok) {
-    if (response.status===401 && path!=='/login') state.user=null;
+    if (response.status===401 && path!=='/login') { state.user=null; state.newInvite=null; }
     const detail = data?.detail;
     throw new Error(typeof detail==='string' ? detail : Array.isArray(detail) ? detail.map(x=>x.msg).join('; ') : 'Не удалось выполнить действие');
   }
@@ -26,20 +34,27 @@ const send = (path, body) => api(path,{method:'POST',body:JSON.stringify(body)})
 const values = form => Object.fromEntries(new FormData(form).entries());
 function pageHeading(title, description) { return `<div class="page-heading"><h1>${title}</h1><p>${description}</p></div>`; }
 function empty(title, description, action='') { return `<div class="empty"><div class="symbol">◇</div><h3>${title}</h3><p>${description}</p>${action}</div>`; }
+function currentPage() { return location.hash.slice(1).split('?')[0] || (location.pathname==='/admin'?'admin':'home'); }
 function refreshNav() {
-  const page=location.hash.slice(1).split('?')[0]||'home';
+  const page=currentPage();
+  document.querySelector('#admin-link').hidden=!state.user?.is_admin;
   document.querySelectorAll('[data-nav]').forEach(a=>a.classList.toggle('active',a.dataset.nav===page));
   document.querySelector('#create-link').hidden=state.user?.role!=='track';
   document.querySelector('#auth-actions').innerHTML=state.user ? `<button class="btn ghost small" id="logout">Выйти</button>` : `<a class="btn small" href="#login" data-goal="open_login">Войти</a>`;
 }
 async function render() {
   refreshNav();
-  const page=location.hash.slice(1).split('?')[0]||'home';
+  const page=currentPage();
   try {
     if (page==='home') return renderHome();
     if (page==='listings') return await renderListings();
     if (page==='login'||page==='register') return renderAuth(page);
     if (!state.user) { location.hash='login'; return; }
+    if (page==='admin') {
+      if (!state.user.is_admin) return emptyInApp('Нет доступа', 'Раздел доступен только мастер-аккаунту.');
+      if (location.pathname!=='/admin') { location.assign('/admin'); return; }
+      return await renderAdmin();
+    }
     if (page==='account') return await renderAccount();
     if (page==='create'&&state.user.role==='track') return renderCreate();
     if (/^edit\/\d+$/.test(page)&&state.user.role==='track') return await renderEdit(Number(page.split('/')[1]));
@@ -47,6 +62,7 @@ async function render() {
     location.hash='home';
   } catch(error) { app.innerHTML=empty('Не удалось загрузить страницу',escapeHtml(error.message),'<button class="btn" id="retry">Повторить</button>'); }
 }
+function emptyInApp(title, description) { app.innerHTML=empty(title,description,'<a class="btn" href="/#account">В личный кабинет</a>'); }
 function renderHome() {
   app.innerHTML=`<section class="landing-hero"><div><span class="eyebrow">Площадка для железнодорожной логистики</span><h1>Место для вагонов.<br>Заявка без цепочки звонков.</h1><p>Владельцы путей размещают свободные места и условия. Операторы сравнивают предложения и отправляют заявку прямо на сайте.</p><div class="landing-actions"><a class="btn" href="#listings" data-goal="landing_find_places">Найти место отстоя</a><a class="btn secondary" href="#register?role=track" data-goal="landing_register_track">Разместить площадку</a></div></div><div class="landing-aside"><span>01 / Предложение</span><strong>Площадка и цена</strong><span>02 / Поиск</span><strong>Город и вместимость</strong><span>03 / Заявка</span><strong>Ответ владельца пути</strong></div></section>
   <section class="landing-section"><div class="section-heading"><div><h2>Как работает сервис</h2><p>Две роли и понятный порядок действий</p></div></div><div class="landing-steps"><article><span>01</span><h3>Публикация</h3><p>Владелец пути указывает адрес, вместимость, цену и условия размещения.</p></article><article><span>02</span><h3>Выбор</h3><p>Оператор ищет площадку по городу, свободным местам и цене.</p></article><article><span>03</span><h3>Решение</h3><p>Владелец пути видит данные заявителя и подтверждает или отклоняет запрос.</p></article></div></section>
@@ -71,8 +87,9 @@ function listingCard(x, mine=false) {
 }
 function renderAuth(page) {
   const signup=page==='register';
-  const trackSignup=new URLSearchParams(location.hash.split('?')[1]||'').get('role')==='track';
-  app.innerHTML=`<div class="auth-wrap"><div class="form-card"><div class="eyebrow">ВагонМесто</div><h1>${signup?'Создать аккаунт':'С возвращением'}</h1><p>${signup?'Выберите роль. Для участия в пилоте используйте данные из приглашения.':'Войдите, чтобы работать с объявлениями и заявками.'}</p><form id="auth-form">${signup?`<div class="field"><label>Ваше имя</label><input name="name" required minlength="2" maxlength="100" autocomplete="name"></div>`:''}<div class="field"><label>Email</label><input name="email" type="email" required autocomplete="email"></div><div class="field"><label>Пароль</label><input name="password" type="password" required minlength="${signup?8:1}" autocomplete="${signup?'new-password':'current-password'}"></div>${signup?`<div class="field"><label>Тип аккаунта</label><select name="role"><option value="wagon" ${trackSignup?'':'selected'}>Владелец вагонов</option><option value="track" ${trackSignup?'selected':''}>Владелец путей</option></select></div>${window.WAGONHUB_INVITE_REQUIRED?'<div class="field"><label>Код приглашения</label><input name="invite_code" required maxlength="128" autocomplete="off"></div>':''}`:''}<button class="btn" type="submit">${signup?'Зарегистрироваться':'Войти'}</button></form><div class="auth-switch">${signup?'Уже есть аккаунт? <a href="#login">Войти</a>':'Нет аккаунта? <a href="#register">Зарегистрироваться</a>'}</div></div></div>`;
+  const params=new URLSearchParams(location.hash.split('?')[1]||'');
+  const trackSignup=(linkInvite?.role||params.get('role'))==='track';
+  app.innerHTML=`<div class="auth-wrap"><div class="form-card"><div class="eyebrow">ВагонМесто</div><h1>${signup?'Создать аккаунт':'С возвращением'}</h1><p>${signup?'Выберите роль. Для участия в пилоте используйте данные из приглашения.':'Войдите, чтобы работать с объявлениями и заявками.'}</p>${signup&&linkInvite?'<p class="hint">Ссылка прикреплена. Используйте email, на который вас пригласили.</p>':''}${signup&&params.has('invalid_invite')?'<p class="hint">Ссылка неполная. Попросите администратора прислать её ещё раз.</p>':''}<form id="auth-form">${signup?`<div class="field"><label>Ваше имя</label><input name="name" required minlength="2" maxlength="100" autocomplete="name"></div>`:''}<div class="field"><label>Email</label><input name="email" type="email" required autocomplete="email"></div><div class="field"><label>Пароль</label><input name="password" type="password" required minlength="${signup?8:1}" autocomplete="${signup?'new-password':'current-password'}"></div>${signup?`<div class="field"><label>Тип аккаунта</label><select name="role"${linkInvite?' disabled':''}><option value="wagon" ${trackSignup?'':'selected'}>Владелец вагонов</option><option value="track" ${trackSignup?'selected':''}>Владелец путей</option></select></div>${(window.WAGONHUB_INVITE_REQUIRED||window.WAGONHUB_ADMIN_ENABLED)&&!linkInvite?`<div class="field"><label>Код приглашения</label><input name="invite_code" ${window.WAGONHUB_INVITE_REQUIRED?'required':''} maxlength="128" autocomplete="off"></div>`:''}`:''}<button class="btn" type="submit">${signup?'Зарегистрироваться':'Войти'}</button></form><div class="auth-switch">${signup?'Уже есть аккаунт? <a href="#login">Войти</a>':'Нет аккаунта? <a href="#register">Зарегистрироваться</a>'}</div></div></div>`;
 }
 async function renderAccount() {
   const user=state.user;
@@ -106,12 +123,37 @@ async function renderCompany() {
   const company=await api('/company');
   app.innerHTML=pageHeading('Компания','Данные компании используются в заявках на вагоно-места.')+(company?`<div class="form-card"><span class="tag dark">Компания создана</span><h2>${escapeHtml(company.name)}</h2><p>ИНН: ${escapeHtml(company.inn)}</p><p>Email: ${escapeHtml(company.email)}</p><p>Телефон: ${escapeHtml(company.phone||'не указан')}</p><a class="btn secondary" href="#account">В кабинет</a></div>`:`<div class="form-card"><form id="company-form" class="form-grid"><div class="field full"><label>Название компании</label><input name="name" required minlength="2" maxlength="200" placeholder="ООО «Транспорт»"></div><div class="field"><label>ИНН (10 или 12 цифр)</label><input name="inn" required pattern="[0-9]{10}([0-9]{2})?" inputmode="numeric" placeholder="1234567890"></div><div class="field"><label>Рабочий email</label><input name="email" type="email" required placeholder="office@example.ru"></div><div class="field full"><label>Телефон (необязательно)</label><input name="phone" type="tel" maxlength="30" placeholder="+7 900 000-00-00"></div><div class="form-actions full"><button class="btn" type="submit">Сохранить компанию</button></div></form></div>`);
 }
+async function renderAdmin() {
+  const items=await api('/admin/invites');
+  const labels={pending:'Действует',used:'Использовано',expired:'Истекло',revoked:'Отозвано'};
+  const expiry=seconds=>new Date(seconds*1000).toLocaleString('ru-RU');
+  const created=state.newInvite && items.some(item=>item.id===state.newInvite.id && item.status==='pending');
+  app.innerHTML=`<section class="page-heading"><h1>Приглашения</h1><p>Ссылки действуют 7 дней и используются для регистрации один раз.</p></section>
+    <div class="form-card"><form id="invite-form" class="form-grid">
+      <div class="field"><label for="invite-email">Email участника</label><input id="invite-email" name="email" type="email" required></div>
+      <div class="field"><label for="invite-role">Роль</label><select id="invite-role" name="role"><option value="track">Владелец путей</option><option value="wagon">Владелец вагонов</option></select></div>
+      <div class="field full" id="invite-inn-field" hidden><label for="invite-inn">ИНН компании</label><input id="invite-inn" name="inn" inputmode="numeric" pattern="[0-9]{10}([0-9]{2})?" disabled></div>
+      <button class="btn" type="submit">Создать приглашение</button>
+    </form></div>
+    ${created?`<div class="panel invite-result"><label for="invite-link">Ссылка для отправки</label><p class="hint">Скопируйте ссылку сейчас: после обновления страницы она не показывается.</p><div class="field"><input id="invite-link" readonly value="${escapeHtml(state.newInvite.url)}"></div><button class="btn" type="button" id="copy-invite">Скопировать ссылку</button></div>`:''}
+    <h2 class="subhead">Последние приглашения</h2><div class="list-stack">
+      ${items.map(item=>`<article class="deal"><div class="deal-head"><div><strong>${escapeHtml(item.email)}</strong><p>${roles[item.role]}${item.inn?` · ИНН ${escapeHtml(item.inn)}`:''} · Срок до ${escapeHtml(expiry(item.expires_at))}</p></div><span class="tag">${labels[item.status]}</span></div>
+      ${item.status==='pending'?`<button class="btn secondary small" type="button" data-revoke-invite="${escapeHtml(item.id)}">Отозвать</button>`:''}</article>`).join('')||empty('Приглашений пока нет','Создайте первое приглашение в форме выше.')}</div>`;
+  document.querySelector('#invite-role').addEventListener('change', event=>{
+    const needed=event.target.value==='wagon';
+    const input=document.querySelector('#invite-inn');
+    document.querySelector('#invite-inn-field').hidden=!needed;
+    input.disabled=!needed;
+    input.required=needed;
+  });
+}
+
 async function handleSubmit(e) {
-  const form=e.target; if (!['auth-form','filters','listing-form','company-form'].includes(form.id)) return;
+  const form=e.target; if (!['auth-form','filters','listing-form','company-form','invite-form'].includes(form.id)) return;
   e.preventDefault(); const v=values(form); const button=form.querySelector('[type=submit]'); button.disabled=true;
   try {
     if (form.id==='filters') { state.before=null; state.cursors=[]; state.filters=Object.fromEntries(Object.entries(v).filter(([,value])=>value)); window.wagonhubAnalytics?.goal('filters_submit'); await render(); }
-    if (form.id==='auth-form') { const signup=location.hash.startsWith('#register'); const result=await send(signup?'/register':'/login',v); state.user=result.user; window.wagonhubAnalytics?.goal(signup?'registration_success':'login_success'); location.hash='account'; toast('Вы вошли в аккаунт'); }
+    if (form.id==='auth-form') { const signup=location.hash.startsWith('#register'); if (signup && linkInvite) { v.invite_token=linkInvite.token; v.role=linkInvite.role; } const result=await send(signup?'/register':'/login',v); linkInvite=null; state.user=result.user; window.wagonhubAnalytics?.goal(signup?'registration_success':'login_success'); if (location.pathname==='/admin'&&state.user.is_admin) { history.replaceState(null,'','/admin'); await render(); } else { location.hash='account'; } toast('Вы вошли в аккаунт'); }
     if (form.id==='listing-form') {
       const payload={...v,capacity:Number(v.capacity)};
       if (form.dataset.listingId) {
@@ -119,6 +161,14 @@ async function handleSubmit(e) {
         window.wagonhubAnalytics?.goal('listing_updated'); toast('Объявление обновлено');
       } else { await send('/listings',payload); window.wagonhubAnalytics?.goal('listing_created'); toast('Объявление опубликовано'); }
       location.hash='account';
+    }
+    if (form.id==='invite-form') {
+      const result=await send('/admin/invites',{email:v.email,role:v.role,inn:v.role==='wagon'?v.inn:null});
+      const url=new URL('/invite',location.origin);
+      url.hash=result.token+'/'+result.role;
+      state.newInvite={id:result.id,url:url.href};
+      await render();
+      toast('Приглашение создано');
     }
     if (form.id==='company-form') { await send('/company',v); window.wagonhubAnalytics?.goal('company_created'); toast('Компания создана'); location.hash='account'; }
   } catch(error) { toast(error.message,true); } finally { button.disabled=false; }
@@ -130,6 +180,17 @@ async function handleClick(e) {
     if (target.id==='clear-filters') { state.filters={}; state.before=null; state.cursors=[]; await render(); }
     if (target.id==='catalog-next' && state.next) { state.cursors.push(state.before); state.before=state.next; await render(); }
     if (target.id==='catalog-prev' && state.cursors.length) { state.before=state.cursors.pop(); await render(); }
+    if (target.id==='copy-invite') {
+      const input=document.querySelector('#invite-link');
+      try { await navigator.clipboard.writeText(input.value); toast('Ссылка скопирована'); }
+      catch { input.focus(); input.select(); toast('Ссылка выделена. Скопируйте её вручную'); }
+    }
+    if (target.dataset.revokeInvite) {
+      if (!confirm('Отозвать приглашение? По этой ссылке больше нельзя будет зарегистрироваться.')) return;
+      await send('/admin/invites/'+target.dataset.revokeInvite+'/revoke',{});
+      if (state.newInvite?.id===target.dataset.revokeInvite) state.newInvite=null;
+      await render();
+    }
     if (target.id==='alerts-seen') { await send('/my/notifications/seen',state.alerts); await render(); }
     if (target.dataset.complete) {
       if (!confirm('Вагоны уже покинули площадку? Места снова появятся в каталоге.')) return;
@@ -138,7 +199,7 @@ async function handleClick(e) {
       finally { target.disabled=false; }
     }
     if (target.dataset.edit) location.hash=`edit/${target.dataset.edit}`;
-    if (target.id==='logout') { await api('/logout',{method:'POST'}); state.user=null; location.hash='listings'; await render(); }
+    if (target.id==='logout') { await api('/logout',{method:'POST'}); state.user=null; state.newInvite=null; location.hash='listings'; await render(); }
     if (target.dataset.withdraw) { if (!confirm('Снять объявление? Ожидающие заявки будут отклонены.')) return; await send(`/listings/${target.dataset.withdraw}/withdraw`,{}); window.wagonhubAnalytics?.goal('listing_withdrawn'); toast('Объявление снято'); await render(); }
     if (target.dataset.request) {
       const wagons=prompt(`Сколько вагонов разместить? Свободно: ${target.dataset.free}`,'1');

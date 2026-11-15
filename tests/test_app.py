@@ -308,3 +308,79 @@ def test_catalog_cursor_and_unicode_city(client):
     listing(client, track, city='Тверь')
     assert [x['id'] for x in client.get('/api/listings?city=МОСКВА&limit=1').json()] == [second]
     assert [x['id'] for x in client.get(f'/api/listings?city=МОСКВА&limit=1&before={second}').json()] == [first]
+
+
+def test_master_creates_revokes_and_reissues_invites(client, monkeypatch):
+    monkeypatch.setenv('PILOT_ADMIN_EMAIL', 'master@example.com')
+    monkeypatch.setenv('PILOT_INVITES_JSON',
+                       '{"master@example.com":{"role":"track","code":"MMMMMMMMMMMMMMMMMMMMMMMMMMMM"}}')
+    assert client.get('/api/admin/invites').status_code == 401
+    member = register(client, 'track', 'ordinary@example.com')
+    master_fields = {'name': 'Администратор', 'email': 'master@example.com', 'role': 'track',
+                     'password': 'securepassword'}
+    assert client.post('/api/register', json=master_fields).status_code == 403
+    root = client.post('/api/register', json={**master_fields, 'invite_code': 'M' * 28})
+    assert root.status_code == 201 and root.json()['user']['is_admin'] is True
+    master = session_header(root)
+    assert client.get('/api/admin/invites', headers=member).status_code == 403
+    fields = {'email': 'testwagon@example.com', 'role': 'wagon', 'inn': '1234567890'}
+    assert client.post('/api/admin/invites', headers=member, json=fields).status_code == 403
+    assert client.post('/api/admin/invites', headers={**master, 'X-WagonHub-Request': ''},
+                       json=fields).status_code == 403
+    assert client.post('/api/admin/invites', headers=master,
+                       json={**fields, 'inn': None}).status_code == 422
+    assert client.post('/api/admin/invites', headers=master,
+                       json={'email': master_fields['email'], 'role': 'track'}).status_code == 409
+    r = client.post('/api/admin/invites', headers=master, json=fields)
+    assert r.status_code == 201 and r.headers['cache-control'] == 'no-store'
+    first = r.json()
+    assert client.post('/api/admin/invites', headers=master, json=fields).status_code == 409
+    rows = client.get('/api/admin/invites', headers=master)
+    assert rows.json()[0]['status'] == 'pending' and first['token'] not in rows.text
+    assert client.post(f"/api/admin/invites/{first['id']}/revoke", headers=master).status_code == 204
+    assert client.post(f"/api/admin/invites/{first['id']}/revoke", headers=master).status_code == 409
+
+    monkeypatch.setattr(security, 'production', lambda: True)
+    signup = {'email': fields['email'], 'role': 'wagon', 'name': 'Участник пилота',
+              'password': 'securepassword'}
+    assert client.post('/api/register', json={**signup, 'invite_token': first['token']}).status_code == 403
+    second = client.post('/api/admin/invites', headers=master, json=fields).json()
+    assert first['token'] != second['token']
+    signup['invite_token'] = second['token']
+    assert client.post('/api/register', json={**signup, 'email': 'other@example.com'}).status_code == 403
+    assert client.post('/api/register', json={**signup, 'role': 'track'}).status_code == 403
+    signed = client.post('/api/register', json=signup)
+    assert signed.status_code == 201, signed.text
+    assert signed.json()['user']['is_admin'] is False
+    assert client.post('/api/register', json=signup).status_code == 403
+    assert company(client, session_header(signed), inn='1234567891').status_code == 403
+    assert company(client, session_header(signed), inn=fields['inn']).status_code == 201
+    relogin = client.post('/api/login', json={'email': signup['email'], 'password': signup['password']})
+    assert relogin.status_code == 200
+    rows = client.get('/api/admin/invites', headers=master).json()
+    assert {i['id']:i['status'] for i in rows} == {first['id']:'revoked',second['id']:'used'}
+    assert client.post(f"/api/admin/invites/{second['id']}/revoke", headers=master).status_code == 409
+
+
+def test_expired_links_and_private_pages(client, monkeypatch):
+    from wagonhub import invites
+
+    monkeypatch.setenv('YANDEX_METRIKA_ID', '12345678')
+    for path in ('/invite', '/admin'):
+        response = client.get(path)
+        assert response.status_code == 200 and 'window.WAGONHUB_METRIKA_ID=null' in response.text
+        assert response.headers['cache-control'] == 'no-store'
+        assert response.headers['referrer-policy'] == 'no-referrer'
+    assert 'window.WAGONHUB_METRIKA_ID=12345678' in client.get('/').text
+
+    admin = register(client, 'track', 'existing@example.com')
+    monkeypatch.setenv('PILOT_ADMIN_EMAIL', 'existing@example.com')
+    monkeypatch.setattr(invites.time, 'time', lambda: 10000)
+    data = {'email': 'new@example.com', 'role': 'track'}
+    first = client.post('/api/admin/invites', json=data, headers=admin).json()
+    assert first['expires_at'] == 10000 + 7 * 86400
+    monkeypatch.setattr(invites.time, 'time', lambda: first['expires_at'])
+    assert client.get('/api/admin/invites', headers=admin).json()[0]['status'] == 'expired'
+    assert client.post('/api/register', json={**data, 'name': 'Участник',
+                       'password': 'securepassword', 'invite_token': first['token']}).status_code == 403
+    assert client.post('/api/admin/invites', json=data, headers=admin).status_code == 201
