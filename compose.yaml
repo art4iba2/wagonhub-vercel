@@ -4,7 +4,7 @@ services:
     environment:
       YANDEX_METRIKA_ID: ${YANDEX_METRIKA_ID:-}
     ports:
-      - "8000:8000"
+      - "127.0.0.1:8000:8000"
     volumes:
       - wagonhub_data:/data
     restart: unless-stopped

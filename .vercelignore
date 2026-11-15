@@ -7,3 +7,6 @@ upload/
 *.db
 *.db-*
 *.zip
+.env
+.env.*
+*.dump

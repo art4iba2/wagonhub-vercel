@@ -3,6 +3,13 @@
 .pytest_cache
 .coverage
 __pycache__
-tests
 upload
 *.db
+.env
+.env.*
+*.zip
+pip-*
+tmp*
+build
+*.egg-info
+*.dump

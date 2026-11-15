@@ -1,13 +1,13 @@
 import pytest
 from fastapi.testclient import TestClient
-from wagonhub import db
+from wagonhub import db, security
 from wagonhub.app import app
 
 
 @pytest.fixture
 def client(tmp_path, monkeypatch):
     monkeypatch.setattr(db, 'DB_PATH', str(tmp_path / 'test.db'))
-    with TestClient(app) as test:
+    with TestClient(app, headers={'X-WagonHub-Request': '1'}) as test:
         yield test
 
 
@@ -15,7 +15,12 @@ def register(client, role, email):
     response = client.post('/api/register', json={'name': 'Тестовый пользователь', 'email': email,
                                                    'password': 'securepassword', 'role': role})
     assert response.status_code == 201, response.text
-    return {'Authorization': 'Bearer ' + response.json()['token']}
+    client.cookies.clear()
+    return session_header(response)
+
+
+def session_header(response):
+    return {'Cookie': f'{security.COOKIE}={response.cookies[security.COOKIE]}'}
 
 
 def listing(client, headers, **changes):
@@ -46,11 +51,11 @@ def test_frontend_and_auth(client):
     assert client.post('/api/login', json={'email': 'nobody@example.com', 'password': 'wrong'}).status_code == 401
     login = client.post('/api/login', json={'email': 'TRACK@example.com', 'password': 'securepassword'})
     assert login.status_code == 200
-    assert client.get('/api/me', headers={'Authorization': 'Bearer invalid'}).status_code == 401
-    assert client.get('/api/me', headers={'Authorization': 'Basic abc'}).status_code == 401
+    assert client.get('/api/me', headers={'Cookie': f'{security.COOKIE}=invalid'}).status_code == 401
+    assert client.get('/api/me', headers={'Cookie': 'other=abc'}).status_code == 401
     assert client.post('/api/logout', headers=track).status_code == 204
     assert client.get('/api/me', headers=track).status_code == 401
-    assert client.get('/api/me', headers={'Authorization': 'Bearer '+login.json()['token']}).status_code == 200
+    assert client.get('/api/me', headers=session_header(login)).status_code == 200
 
 
 def test_metrika_configuration(client, monkeypatch):
@@ -60,8 +65,10 @@ def test_metrika_configuration(client, monkeypatch):
     assert 'window.WAGONHUB_METRIKA_ID=12345678' in response.text
     assert '__YANDEX_METRIKA_ID__' not in response.text
     monkeypatch.setenv('YANDEX_METRIKA_ID', '12</script>')
-    with pytest.raises(RuntimeError, match='YANDEX_METRIKA_ID'):
-        client.get('/')
+    response = client.get('/')
+    assert response.status_code == 200
+    assert 'window.WAGONHUB_METRIKA_ID=null' in response.text
+    assert '12</script>' not in response.text
 
 
 def test_roles_companies_and_validation(client):
@@ -183,9 +190,10 @@ def test_applicant_contacts_and_edit_listing(client):
     assert client.get('/api/listings').json() == []
 
 
-def test_vercel_requires_persistent_database(monkeypatch):
+@pytest.mark.parametrize(('key', 'value'), [('VERCEL', '1'), ('APP_ENV', 'production')])
+def test_production_requires_persistent_database(monkeypatch, key, value):
     monkeypatch.setattr(db, 'DATABASE_URL', '')
-    monkeypatch.setenv('VERCEL', '1')
+    monkeypatch.setenv(key, value)
     with pytest.raises(RuntimeError, match='DATABASE_URL'):
         db.connect()
 
@@ -231,3 +239,72 @@ def test_postgres_adapter_and_transaction(monkeypatch):
         raise ValueError('rollback')
     assert connections[2].statements[-1][0] == 'ROLLBACK'
     assert connections[2].closed
+
+
+def test_pilot_invitation_csrf_and_rate_limit(client, monkeypatch):
+    monkeypatch.setattr(security, 'production', lambda: True)
+    monkeypatch.setattr(security.time, 'time', lambda: 1201)
+    code = 'I' * 28
+    monkeypatch.setenv('PILOT_INVITES_JSON',
+                       f'{{"pilot@example.com":{{"role":"wagon","code":"{code}","inn":"1234567890"}}}}')
+    fields = {'name': 'Участник пилота', 'email': 'pilot@example.com',
+              'password': 'securepassword', 'role': 'wagon', 'invite_code': code}
+    assert client.post('/api/register', json=fields, headers={'X-WagonHub-Request': ''}).status_code == 403
+    assert client.post('/api/register', json={**fields, 'role': 'track'}).status_code == 403
+    assert client.post('/api/register', json={**fields, 'invite_code': 'wrong'}).status_code == 403
+    response = client.post('/api/register', json=fields)
+    assert response.status_code == 201, response.text
+    assert 'token' not in response.json()
+    for attr in ('HttpOnly', 'Secure', 'SameSite=lax'):
+        assert attr in response.headers['set-cookie']
+    headers = session_header(response)
+    assert company(client, headers, inn='1234567891').status_code == 403
+    assert company(client, headers).status_code == 201
+    assert client.post('/api/logout', headers={**headers, 'X-WagonHub-Request': ''}).status_code == 403
+    for _ in range(8):
+        assert client.post('/api/login', json={'email': fields['email'], 'password': 'wrong'}).status_code == 401
+    limited = client.post('/api/login', json={'email': fields['email'], 'password': 'wrong'})
+    assert limited.status_code == 429
+    assert int(limited.headers['Retry-After']) > 0
+    monkeypatch.setenv('PILOT_INVITES_JSON', '{}')
+    assert client.get('/api/me', headers=headers).status_code == 401
+
+
+def test_complete_releases_capacity_and_notifies(client):
+    owner = register(client, 'track', 'track@example.com')
+    other_owner = register(client, 'track', 'other@example.com')
+    wagon = register(client, 'wagon', 'wagon@example.com')
+    assert company(client, wagon).status_code == 201
+    item = listing(client, owner, capacity=1).json()['id']
+    deal = client.post('/api/deals', headers=wagon, json={'listing_id': item, 'wagons': 1}).json()['id']
+    assert client.get('/api/my/deals', headers=wagon).json()[0]['track_email'] is None
+    assert client.get('/api/my/notifications', headers=owner).json() == [{'deal_id': deal, 'event': 'pending'}]
+    assert client.get('/api/my/notifications', headers=other_owner).json() == []
+    path = f'/api/deals/{deal}'
+    assert client.post(path+'/complete', headers=owner).status_code == 409
+    assert client.post(path+'/decision', headers=owner, json={'status': 'confirmed'}).status_code == 200
+    assert client.get('/api/listings').json() == []
+    assert client.get('/api/my/deals', headers=wagon).json()[0]['track_email'] == 'track@example.com'
+    assert client.post(path+'/complete', headers=other_owner).status_code == 403
+    assert client.post(path+'/complete', headers=owner).json() == {'status': 'completed'}
+    assert client.post(path+'/complete', headers=owner).status_code == 409
+    assert client.get('/api/listings').json()[0]['free_capacity'] == 1
+    assert client.get('/api/my/deals', headers=wagon).json()[0]['status'] == 'completed'
+    assert {n['event'] for n in client.get('/api/my/notifications', headers=wagon).json()} == {'confirmed', 'completed'}
+    for event in ('confirmed', 'completed'):
+        assert client.post('/api/my/notifications/seen', headers=wagon,
+                           json=[{'deal_id': deal, 'event': event}]).status_code == 204
+        if event == 'confirmed':
+            assert client.get('/api/my/notifications', headers=wagon).json() == [
+                {'deal_id': deal, 'event': 'completed'}]
+    assert client.get('/api/my/notifications', headers=wagon).json() == []
+    assert client.get('/healthz').status_code == 200
+
+
+def test_catalog_cursor_and_unicode_city(client):
+    track = register(client, 'track', 'track@example.com')
+    first = listing(client, track).json()['id']
+    second = listing(client, track).json()['id']
+    listing(client, track, city='Тверь')
+    assert [x['id'] for x in client.get('/api/listings?city=МОСКВА&limit=1').json()] == [second]
+    assert [x['id'] for x in client.get(f'/api/listings?city=МОСКВА&limit=1&before={second}').json()] == [first]

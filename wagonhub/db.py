@@ -1,4 +1,4 @@
-"""SQLite for local runs, PostgreSQL for Vercel. One connection per operation."""
+"""SQLite for local runs and external PostgreSQL for production."""
 import os
 import sqlite3
 from contextlib import contextmanager, closing
@@ -95,7 +95,7 @@ class PostgresConnection:
     """Keep the existing positional SQL API usable with psycopg."""
 
     def __init__(self):
-        self.raw = psycopg.connect(DATABASE_URL, autocommit=True, row_factory=dict_row)
+        self.raw = psycopg.connect(DATABASE_URL, autocommit=True, row_factory=dict_row, connect_timeout=5)
 
     def execute(self, query, parameters=()):
         return self.raw.execute(query.replace('?', '%s'), parameters)
@@ -113,25 +113,48 @@ class PostgresConnection:
 def connect():
     if DATABASE_URL:
         return PostgresConnection()
-    if os.environ.get('VERCEL'):
-        raise RuntimeError('Для Vercel задайте DATABASE_URL внешней PostgreSQL базы')
+    if os.environ.get('VERCEL') or os.environ.get('APP_ENV') == 'production':
+        raise RuntimeError('Для production задайте DATABASE_URL внешней PostgreSQL базы')
     path = Path(DB_PATH)
     path.parent.mkdir(parents=True, exist_ok=True)
     con = sqlite3.connect(path, timeout=10, isolation_level=None)
     con.row_factory = sqlite3.Row
+    con.create_function("unicode_lower", 1, str.lower, deterministic=True)
     con.execute("PRAGMA foreign_keys=ON")
     con.execute("PRAGMA busy_timeout=10000")
     return con
 
 
+# Additive migration: keep the original deals table and existing records intact.
+PILOT_SCHEMA = """
+CREATE TABLE IF NOT EXISTS deal_releases (
+ deal_id BIGINT PRIMARY KEY REFERENCES deals(id), released_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS deal_notifications (
+ user_id BIGINT NOT NULL REFERENCES users(id), deal_id BIGINT NOT NULL REFERENCES deals(id),
+ event TEXT NOT NULL, seen INTEGER NOT NULL DEFAULT 0,
+ PRIMARY KEY(user_id, deal_id, event)
+);
+CREATE INDEX IF NOT EXISTS idx_notifications_user_seen ON deal_notifications(user_id,seen);
+CREATE TABLE IF NOT EXISTS auth_limits (
+ key TEXT NOT NULL, bucket BIGINT NOT NULL, attempts INTEGER NOT NULL,
+ PRIMARY KEY(key,bucket)
+);
+CREATE INDEX IF NOT EXISTS idx_auth_limits_bucket ON auth_limits(bucket);
+"""
+
+
 def init_db():
-    with closing(connect()) as con:
-        if DATABASE_URL:
-            for statement in POSTGRES_SCHEMA.split(';'):
+    if DATABASE_URL:
+        with transaction() as con:
+            # Serialize schema changes across instances during rolling deploys.
+            con.execute('SELECT pg_advisory_xact_lock(762217531)')
+            for statement in (POSTGRES_SCHEMA + PILOT_SCHEMA).split(';'):
                 if statement.strip():
                     con.execute(statement)
-        else:
-            con.executescript(SCHEMA)
+    else:
+        with closing(connect()) as con:
+            con.executescript(SCHEMA + PILOT_SCHEMA)
 
 
 def insert_id(con, query, parameters):
@@ -151,6 +174,9 @@ def transaction():
     con = connect()
     try:
         con.execute("BEGIN" if DATABASE_URL else "BEGIN IMMEDIATE")
+        if DATABASE_URL:
+            con.execute("SET LOCAL statement_timeout = 8000")
+            con.execute("SET LOCAL lock_timeout = 4000")
         yield con
         con.commit()
     except Exception:

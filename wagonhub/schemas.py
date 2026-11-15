@@ -16,6 +16,7 @@ class Register(BaseModel):
     email: EmailStr
     password: str = Field(min_length=8, max_length=128)
     role: Literal['track', 'wagon']
+    invite_code: str = Field(default='', max_length=128)
 
     @field_validator('name')
     @classmethod
@@ -25,7 +26,7 @@ class Register(BaseModel):
 
 class Login(BaseModel):
     email: EmailStr
-    password: str
+    password: str = Field(min_length=1, max_length=128)
 
 
 class CompanyIn(BaseModel):
@@ -61,3 +62,8 @@ class DealIn(BaseModel):
 
 class Decision(BaseModel):
     status: Literal['confirmed', 'rejected']
+
+
+class NotificationReceipt(BaseModel):
+    deal_id: int = Field(gt=0, le=9223372036854775807)
+    event: Literal['pending', 'confirmed', 'rejected', 'completed']

@@ -1,0 +1,24 @@
+# Isolated, disposable integration database. No ports or live credentials.
+services:
+  postgres:
+    image: postgres:17
+    environment:
+      POSTGRES_USER: wagonhub_test
+      POSTGRES_PASSWORD: local-tests-only
+      POSTGRES_DB: wagonhub_test
+    tmpfs:
+      - /var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U wagonhub_test -d wagonhub_test"]
+      interval: 2s
+      timeout: 3s
+      retries: 20
+  tests:
+    build:
+      context: .
+      target: test
+    environment:
+      WAGONHUB_TEST_POSTGRES: postgresql://wagonhub_test:local-tests-only@postgres:5432/wagonhub_test
+    depends_on:
+      postgres:
+        condition: service_healthy
