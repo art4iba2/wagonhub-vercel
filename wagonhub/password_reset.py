@@ -1,16 +1,22 @@
 """Email challenges and short-lived, single-use password reset grants."""
 import hashlib
 import hmac
-import json
 import logging
 import os
 import secrets
+import smtplib
+import ssl
 import time
-from urllib import error, request
+from email.message import EmailMessage
+from email.headerregistry import Address
+
+from email_validator import EmailNotValidError, validate_email
 
 from . import db
 
-API = 'https://goapi.unisender.ru/ru/transactional/api/v1/email/send.json'
+SMTP_HOST = 'postbox.cloud.yandex.net'
+SMTP_PORT = 465
+SMTP_TIMEOUT = 5
 LOG = logging.getLogger(__name__)
 TTL = 600
 RESEND_AFTER = 60
@@ -18,10 +24,24 @@ MAX_ATTEMPTS = 5
 
 
 def settings():
-    key = os.getenv('UNISENDER_GO_API_KEY', '').strip()
+    username = os.getenv('POSTBOX_SMTP_USER', '').strip()
+    password = os.getenv('POSTBOX_SMTP_PASSWORD', '').strip()
     sender = os.getenv('RESET_FROM_EMAIL', '').strip()
     secret = os.getenv('PASSWORD_RESET_SECRET', '').strip()
-    return (key, sender, secret) if key and sender and len(secret) >= 32 else None
+    if not (username and password and sender and len(secret) >= 32):
+        return None
+    try:
+        sender = validate_email(sender, check_deliverability=False, allow_smtputf8=False).normalized
+    except EmailNotValidError:
+        return None
+    return username, password, sender, secret
+
+
+def pad_request_time(started):
+    # Ordinary requests, unknown emails and cooldowns have a similar minimum response time.
+    remaining = 3.0 - (time.monotonic() - started)
+    if remaining > 0:
+        time.sleep(remaining)
 
 
 def digest(secret, kind, uid, challenge, value):
@@ -66,40 +86,30 @@ def consume(con, uid, secret, token):
         (uid, digest(secret, 'grant', uid, row['challenge'], token), int(time.time()))).fetchone() is not None
 
 
-class NoRedirect(request.HTTPRedirectHandler):
-    def redirect_request(self, req, fp, code, msg, headers, newurl):
-        return None
-
-
-def send_email(key, sender, email, challenge, code):
-    payload = {'message': {
-        'recipients': [{'email': email}],
-        'from_email': sender,
-        'from_name': 'ВагонМесто',
-        'subject': 'Код восстановления пароля ВагонМесто',
-        'idempotence_key': challenge,
-        'body': {'plaintext': f'Ваш код восстановления: {code}\n\n'
-                              'Код действует 10 минут. Никому не сообщайте его. '
-                              'Если вы не запрашивали смену пароля, проигнорируйте письмо.'}
-    }}
-    req = request.Request(API, json.dumps(payload).encode(),
-                          {'X-API-KEY': key, 'Content-Type': 'application/json'}, method='POST')
+def send_email(username, password, sender, email, code):
+    message = EmailMessage()
+    message['From'] = Address('ВагонМесто', addr_spec=sender)
+    message['To'] = email
+    message['Subject'] = 'Код восстановления пароля ВагонМесто'
+    message.set_content(
+        f'Ваш код восстановления: {code}\n\n'
+        'Код действует 10 минут. Никому не сообщайте его. '
+        'Если вы не запрашивали смену пароля, проигнорируйте письмо.'
+    )
     try:
-        with request.build_opener(NoRedirect()).open(req, timeout=6) as response:
-            result = json.load(response)
-        if not isinstance(result, dict) or result.get('status') != 'success' or result.get('failed_emails'):
-            LOG.warning('Password reset: mail provider rejected request')
-            return False
-        return True
-    except error.HTTPError as exc:
-        LOG.warning('Password reset: mail provider HTTP %s', exc.code)
+        with smtplib.SMTP_SSL(SMTP_HOST, SMTP_PORT, timeout=SMTP_TIMEOUT,
+                              context=ssl.create_default_context()) as smtp:
+            smtp.login(username, password)
+            return not smtp.send_message(message, from_addr=sender, to_addrs=[email])
+    except smtplib.SMTPResponseException as exc:
+        LOG.warning('Password reset: Postbox SMTP %s', exc.smtp_code)
     except (OSError, ValueError):
-        LOG.warning('Password reset: mail provider unavailable or invalid response')
+        LOG.warning('Password reset: Postbox unavailable or unable to send')
     return False
 
 
-def deliver(key, sender, uid, email, challenge, code):
-    if not send_email(key, sender, email, challenge, code):
+def deliver(username, password, sender, uid, email, challenge, code):
+    if not send_email(username, password, sender, email, code):
         # Keep the cooldown, but do not leave a usable code after a known delivery API failure.
         try:
             with db.transaction() as con:
