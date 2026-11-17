@@ -1,6 +1,5 @@
-import io
-import json
-from urllib.error import HTTPError
+import smtplib
+import ssl
 
 import pytest
 from fastapi.testclient import TestClient
@@ -14,13 +13,15 @@ from wagonhub.app import app
 def recovery(tmp_path, monkeypatch):
     monkeypatch.setattr(db, 'DB_PATH', str(tmp_path / 'reset.db'))
     for name, value in {
-        'UNISENDER_GO_API_KEY': 'fake-key-for-tests',
+        'POSTBOX_SMTP_USER': 'fake-key-id',
+        'POSTBOX_SMTP_PASSWORD': 'fake-key-for-tests',
         'RESET_FROM_EMAIL': 'no-reply@example.com',
         'PASSWORD_RESET_SECRET': 'test-only-secret-' * 4,
     }.items():
         monkeypatch.setenv(name, value)
     clock = [10000]
     monkeypatch.setattr(password_reset.time, 'time', lambda: clock[0])
+    monkeypatch.setattr(password_reset, 'pad_request_time', lambda _: None)
     messages = []
     monkeypatch.setattr(password_reset, 'send_email', lambda *args: messages.append(args) or True)
     with TestClient(app, headers={'X-WagonHub-Request': '1'}) as client:
@@ -46,7 +47,7 @@ def test_master_recovers_without_changing_profile(recovery, monkeypatch):
     assert (missing.status_code, missing.json()) == (created.status_code, created.json())
     assert created.status_code == 202 and created.headers['cache-control'] == 'no-store'
     assert send(c, 'request').status_code == 202
-    assert len(messages) == 1 and messages[0][2] == email
+    assert len(messages) == 1 and messages[0][3] == email
     code = messages[0][-1]
     assert len(code) == 8 and code.isdigit() and code not in created.text
     with db.transaction() as con:
@@ -111,22 +112,39 @@ def test_expiry_invalid_request_and_failed_send(recovery, monkeypatch):
     assert 'window.WAGONHUB_PASSWORD_RESET_ENABLED=false' in c.get('/reset-password').text
 
 
-@pytest.mark.parametrize('result, expected', [({'status':'success','job_id':'demo'}, True),
-                                              ({'status':'success','failed_emails':{'x':'invalid'}}, False),
-                                              (HTTPError('https://example.invalid', 403, '', {}, None), False)])
-def test_unisender_request_contract(monkeypatch, result, expected):
+@pytest.mark.parametrize('rejected', [False, True])
+def test_postbox_smtp_contract(monkeypatch, caplog, rejected):
     class Transport:
-        def open(self, req, timeout):
-            assert req.full_url == password_reset.API and req.get_method() == 'POST'
-            assert req.get_header('X-api-key') == 'fake-api-key' and timeout == 6
-            body = json.loads(req.data)['message']
-            assert body['recipients'] == [{'email':'to@example.com'}]
-            assert body['from_email'] == 'from@example.com'
-            assert '12340000' in body['body']['plaintext']
-            assert body['idempotence_key'] == 'request-id'
-            if isinstance(result, HTTPError):
-                raise result
-            return io.BytesIO(json.dumps(result).encode())
+        def __init__(self, host, port, timeout, context):
+            assert host == 'postbox.cloud.yandex.net' and port == 465 and timeout == 5
+            assert context.check_hostname and context.verify_mode == ssl.CERT_REQUIRED
 
-    monkeypatch.setattr(password_reset.request, 'build_opener', lambda *args: Transport())
-    assert password_reset.send_email('fake-api-key','from@example.com','to@example.com','request-id','12340000') is expected
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            pass
+
+        def login(self, user, password):
+            assert (user, password) == ('test-key-id', 'test-secret')
+
+        def send_message(self, message, *, from_addr, to_addrs):
+            assert from_addr == 'sender@example.com' and to_addrs == ['recipient@example.com']
+            assert '12340000' in message.get_content()
+            assert 'Код восстановления' in str(message['Subject'])
+            if rejected:
+                raise smtplib.SMTPDataError(550, b'recipient@example.com 12340000')
+            return {}
+
+    monkeypatch.setattr(password_reset.smtplib, 'SMTP_SSL', Transport)
+    ok = password_reset.send_email('test-key-id', 'test-secret', 'sender@example.com',
+                                   'recipient@example.com', '12340000')
+    assert ok is not rejected
+    assert 'recipient@example.com' not in caplog.text and '12340000' not in caplog.text
+
+
+def test_invalid_postbox_sender_disables_reset(recovery, monkeypatch):
+    c, _, _ = recovery
+    monkeypatch.setenv('RESET_FROM_EMAIL', 'not-an-email')
+    assert send(c, 'request').status_code == 503
+    assert 'window.WAGONHUB_PASSWORD_RESET_ENABLED=false' in c.get('/reset-password').text

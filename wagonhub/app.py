@@ -4,11 +4,12 @@ import hmac
 import logging
 import os
 import secrets
+import time
 from contextlib import asynccontextmanager, closing
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from fastapi import BackgroundTasks, Body, Depends, FastAPI, HTTPException, Query, Request, Response
+from fastapi import Body, Depends, FastAPI, HTTPException, Query, Request, Response
 from fastapi.exception_handlers import request_validation_exception_handler
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import HTMLResponse, JSONResponse
@@ -228,20 +229,23 @@ def reset_context(action, request, response, address, *, email_limit):
 
 
 @app.post('/api/password-reset/request', status_code=202)
-def request_reset(payload: ResetRequest, request: Request, response: Response, tasks: BackgroundTasks):
-    email, (key, sender, secret) = reset_context('reset-send', request, response, payload.email, email_limit=3)
+def request_reset(payload: ResetRequest, request: Request, response: Response):
+    started = time.monotonic()
+    email, (username, password, sender, secret) = reset_context('reset-send', request, response, payload.email, email_limit=3)
     with db.transaction() as con:
         row = reset_user(con, email, lock=True)
         issued = password_reset.issue(con, row['id'], secret) if row and pilot_member(con, row) else None
     if issued:
         challenge, code = issued
-        tasks.add_task(password_reset.deliver, key, sender, row['id'], email, challenge, code)
+        # Vercel can pause work after the response, so finish SMTP first.
+        password_reset.deliver(username, password, sender, row['id'], email, challenge, code)
+    password_reset.pad_request_time(started)
     return {'message': 'Если аккаунт доступен, мы отправим код на указанный email.'}
 
 
 @app.post('/api/password-reset/verify')
 def verify_reset(payload: ResetVerify, request: Request, response: Response):
-    email, (_, _, secret) = reset_context('reset-verify', request, response, payload.email, email_limit=10)
+    email, (_, _, _, secret) = reset_context('reset-verify', request, response, payload.email, email_limit=10)
     with db.transaction() as con:
         row = reset_user(con, email, lock=True)
         token = password_reset.verify(con, row['id'], secret, payload.code) if row and pilot_member(con, row) else None
@@ -252,7 +256,7 @@ def verify_reset(payload: ResetVerify, request: Request, response: Response):
 
 @app.post('/api/password-reset/complete', status_code=204)
 def complete_reset(payload: ResetComplete, request: Request, response: Response):
-    email, (_, _, secret) = reset_context('reset-complete', request, response, payload.email, email_limit=5)
+    email, (_, _, _, secret) = reset_context('reset-complete', request, response, payload.email, email_limit=5)
     salt = secrets.token_hex(16)
     digest = password_hash(payload.password, salt)
     with db.transaction() as con:
