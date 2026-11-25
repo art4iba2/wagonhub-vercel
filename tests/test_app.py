@@ -199,6 +199,7 @@ def test_production_requires_persistent_database(monkeypatch, key, value):
 
 
 def test_postgres_adapter_and_transaction(monkeypatch):
+    monkeypatch.setattr(db, 'POOL_ENABLED', False)
     class FakeConnection:
         def __init__(self):
             self.statements = []

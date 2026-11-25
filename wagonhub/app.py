@@ -14,6 +14,7 @@ from fastapi.exception_handlers import request_validation_exception_handler
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
+from psycopg_pool import PoolTimeout, TooManyRequests
 
 from . import db, invites, password_reset, security
 from .schemas import AdminInviteIn, CompanyIn, DealIn, Decision, ListingIn, Login, NotificationReceipt, Register, ResetComplete, ResetRequest, ResetVerify
@@ -35,6 +36,13 @@ app = FastAPI(title='ВагонМесто API', version='0.1.0', lifespan=lifesp
               redoc_url=None if security.production() else '/redoc',
               openapi_url=None if security.production() else '/openapi.json')
 app.mount('/static', StaticFiles(directory=STATIC), name='static')
+
+
+@app.exception_handler(PoolTimeout)
+@app.exception_handler(TooManyRequests)
+async def pool_busy(request: Request, exc: Exception):
+    return JSONResponse({'detail': 'Сервис временно занят. Повторите запрос позже.'},
+                        status_code=503, headers={'Cache-Control': 'no-store', 'Retry-After': '1'})
 
 
 @app.exception_handler(RequestValidationError)
@@ -326,7 +334,7 @@ LISTING_QUERY = f"""SELECT l.*,u.name AS owner_name, {RESERVED} AS reserved
 
 
 @app.get('/api/listings')
-def listings(city: str | None = Query(default=None, max_length=100),
+def listings(response: Response, city: str | None = Query(default=None, max_length=100),
              min_capacity: int = Query(default=1, ge=1),
              max_price: float | None = Query(default=None, gt=0, le=9999999999),
              before: int | None = Query(default=None, gt=0, le=9223372036854775807),
@@ -348,6 +356,8 @@ def listings(city: str | None = Query(default=None, max_length=100),
     query = f'SELECT * FROM ({query}) AS q WHERE capacity-reserved >= ? ORDER BY id DESC LIMIT ?'
     with closing(db.connect()) as con:
         rows = con.execute(query, [*args, min_capacity, limit]).fetchall()
+    response.headers['X-WagonHub-DB-Mode'] = db.connection_mode()
+    response.headers['Cache-Control'] = 'no-store'
     return [listing_dict(row) for row in rows]
 
 

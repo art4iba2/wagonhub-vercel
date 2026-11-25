@@ -62,3 +62,7 @@ pytest
 - `wagonhub/static/` — интерфейс на HTML, CSS и JavaScript.
 - `tests/` — API тесты с изолированной базой.
 
+
+## Проверка H1: пул соединений с PostgreSQL
+Режим задаёт `DB_POOL_ENABLED` (по умолчанию `false`). См. [H1-VERCEL.md](H1-VERCEL.md):
+настройка вариантов, проверка фактического режима, измерение p95 и откат.

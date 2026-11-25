@@ -1,11 +1,14 @@
 """SQLite for local runs and external PostgreSQL for production."""
+import atexit
 import os
+from threading import Lock
 import sqlite3
 from contextlib import contextmanager, closing
 from pathlib import Path
 
 import psycopg
 from psycopg.rows import dict_row
+from psycopg_pool import ConnectionPool
 
 DB_PATH = os.environ.get("DATABASE_PATH", str(Path(os.environ.get("DATA_DIR", ".")) / "wagonhub.db"))
 DATABASE_URL = os.environ.get("DATABASE_URL", "")
@@ -91,11 +94,67 @@ CREATE INDEX IF NOT EXISTS idx_deals_listing_status ON deals(listing_id, status)
 """
 
 
+# Settings are deployment-wide, not user/request-controlled. Never log a DSN.
+def _pool_switch(value):
+    value = value.strip().lower()
+    if value not in ('true', 'false'):
+        raise ValueError('DB_POOL_ENABLED must be true or false')
+    return value == 'true'
+
+
+POOL_ENABLED = _pool_switch(os.getenv('DB_POOL_ENABLED', 'false'))
+POOL_SIZE = int(os.getenv('DB_POOL_MAX_SIZE', '4'))
+if not 1 <= POOL_SIZE <= 32:
+    raise ValueError('DB_POOL_MAX_SIZE must be between 1 and 32')
+
+# Use identical driver options in both experiment arms, including when the
+# Neon endpoint itself uses transaction pooling.
+_PG_OPTIONS = dict(autocommit=True, row_factory=dict_row, connect_timeout=5,
+                   prepare_threshold=None)
+_pool = None
+_pool_lock = Lock()
+
+
+def connection_mode():
+    return ('pool' if POOL_ENABLED else 'direct') if DATABASE_URL else 'sqlite'
+
+
+def _get_pool():
+    global _pool
+    # Do not allocate threads or connect before the worker's first DB access.
+    with _pool_lock:
+        if _pool is None:
+            candidate = ConnectionPool(
+                conninfo=DATABASE_URL, kwargs=_PG_OPTIONS.copy(), name='wagonhub',
+                open=False, min_size=0, max_size=POOL_SIZE, timeout=5.0,
+                max_waiting=32, max_idle=60.0, max_lifetime=600.0,
+                check=ConnectionPool.check_connection,
+            )
+            candidate.open()
+            _pool = candidate
+        return _pool
+
+
+def close_pool():
+    global _pool
+    with _pool_lock:
+        pool, _pool = _pool, None
+    if pool is not None:
+        pool.close()
+
+
+# The pool belongs to the Python process, not to a single ASGI request or
+# event loop. This also works with adapters that do not drive ASGI shutdown.
+atexit.register(close_pool)
+
+
 class PostgresConnection:
     """Keep the existing positional SQL API usable with psycopg."""
 
     def __init__(self):
-        self.raw = psycopg.connect(DATABASE_URL, autocommit=True, row_factory=dict_row, connect_timeout=5)
+        self._pool = _get_pool() if POOL_ENABLED else None
+        self.raw = (self._pool.getconn() if self._pool is not None
+                    else psycopg.connect(DATABASE_URL, **_PG_OPTIONS))
 
     def execute(self, query, parameters=()):
         return self.raw.execute(query.replace('?', '%s'), parameters)
@@ -107,7 +166,14 @@ class PostgresConnection:
         self.raw.execute('ROLLBACK')
 
     def close(self):
-        self.raw.close()
+        raw, self.raw = self.raw, None
+        if raw is None:
+            return
+        if self._pool is None:
+            raw.close()
+        else:
+            # Psycopg rolls back stray transactions and discards broken sessions.
+            self._pool.putconn(raw)
 
 
 def connect():

@@ -8,3 +8,5 @@ __pycache__/
 .env.*
 *.dump
 POSTBOX_VERCEL.md
+
+h1-*.csv

@@ -10,3 +10,7 @@ upload/
 .env
 .env.*
 *.dump
+
+bench/
+H1-VERCEL.md
+h1-*.csv
